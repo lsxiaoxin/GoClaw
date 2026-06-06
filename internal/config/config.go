@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 )
 
 const (
@@ -26,6 +28,7 @@ type Config struct {
 	DataDir   string
 	LogLevel  slog.Level
 	Agent     AgentConfig
+	Hooks     hooks.Config
 	LLM       LLMConfig
 	Feishu    FeishuConfig
 }
@@ -101,6 +104,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse GOCLAW_BASH_OUTPUT_LIMIT: %w", err)
 	}
+	hookConfig, err := loadHooks(workspace, envValue(fileEnv, "GOCLAW_HOOKS_CONFIG"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	enableGroups, err := parseBool(envOrDefault(fileEnv, "FEISHU_ENABLE_GROUPS", "false"))
 	if err != nil {
@@ -117,6 +124,7 @@ func Load() (Config, error) {
 			BashTimeout:     bashTimeout,
 			BashOutputLimit: bashOutputLimit,
 		},
+		Hooks: hookConfig,
 		LLM: LLMConfig{
 			APIKey:  strings.TrimSpace(envValue(fileEnv, "LLM_API_KEY")),
 			BaseURL: strings.TrimSpace(envValue(fileEnv, "LLM_BASE_URL")),
@@ -136,6 +144,23 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func loadHooks(workspace string, path string) (hooks.Config, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = filepath.Join(workspace, ".goclaw", "hooks.json")
+	} else if !filepath.IsAbs(path) {
+		path = filepath.Join(workspace, path)
+	}
+	config, err := hooks.LoadFile(path)
+	if errors.Is(err, hooks.ErrConfigNotFound) {
+		return hooks.Config{}, nil
+	}
+	if err != nil {
+		return hooks.Config{}, fmt.Errorf("load hooks from %s: %w", path, err)
+	}
+	return config, nil
 }
 
 func readDotEnv(path string) (map[string]string, error) {

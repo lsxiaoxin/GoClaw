@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/permission"
 )
 
@@ -18,8 +20,9 @@ type Call struct {
 
 // Result is one tool result. Results retain the same order as calls.
 type Result struct {
-	Output string
-	Err    error
+	Output       string
+	Err          error
+	HookMessages []string
 }
 
 // Registry owns tool definitions and dispatch.
@@ -27,6 +30,7 @@ type Registry struct {
 	tools  map[string]Tool
 	infos  []*schema.ToolInfo
 	policy *permission.Engine
+	hooks  *hooks.Bus
 }
 
 // NewRegistry creates a registry and rejects invalid or duplicate tools.
@@ -51,6 +55,11 @@ func NewRegistry(tools ...Tool) (*Registry, error) {
 		registry.infos = append(registry.infos, info)
 	}
 	return registry, nil
+}
+
+// SetHooks installs optional lifecycle hooks for tool execution.
+func (r *Registry) SetHooks(bus *hooks.Bus) {
+	r.hooks = bus
 }
 
 // Permission evaluates one call without executing it.
@@ -116,6 +125,37 @@ func (r *Registry) executeOne(ctx context.Context, call Call) Result {
 	if !exists {
 		return Result{Err: fmt.Errorf("tool %q is not available", call.Name)}
 	}
+
+	var messages []string
+	if r.hooks != nil && !r.hooks.Empty() {
+		pre, err := r.hooks.RunPreToolUse(ctx, call.Name, call.Arguments)
+		if err != nil {
+			return Result{Err: err}
+		}
+		messages = append(messages, pre.Messages...)
+		if pre.Blocked {
+			return Result{
+				Output:       hooks.BlockedMessage(pre.Reason),
+				HookMessages: messages,
+			}
+		}
+	}
+
+	started := time.Now()
 	output, err := registered.Run(ctx, call.Arguments)
-	return Result{Output: output, Err: err}
+	if r.hooks != nil && !r.hooks.Empty() {
+		post, hookErr := r.hooks.RunPostToolUse(
+			ctx,
+			call.Name,
+			call.Arguments,
+			output,
+			err,
+			time.Since(started),
+		)
+		messages = append(messages, post.Messages...)
+		if hookErr != nil {
+			return Result{Output: output, Err: hookErr, HookMessages: messages}
+		}
+	}
+	return Result{Output: output, Err: err, HookMessages: messages}
 }

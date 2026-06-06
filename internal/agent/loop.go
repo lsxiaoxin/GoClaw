@@ -311,10 +311,20 @@ func validateCheckpoint(checkpoint *Checkpoint) error {
 }
 
 func toolResultText(result goclawtool.Result) string {
+	text := result.Output
 	if result.Err != nil {
-		return "Error: " + result.Err.Error()
+		text = "Error: " + result.Err.Error()
 	}
-	return result.Output
+	for _, message := range result.HookMessages {
+		if strings.TrimSpace(message) == "" {
+			continue
+		}
+		if text != "" {
+			text += "\n"
+		}
+		text += "Hook message: " + strings.TrimSpace(message)
+	}
+	return text
 }
 
 func failedResult(err error) (RunResult, error) {

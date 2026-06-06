@@ -14,6 +14,7 @@ import (
 	channelcli "github.com/lsxiaoxin/GoClaw/internal/channel/cli"
 	channelfeishu "github.com/lsxiaoxin/GoClaw/internal/channel/feishu"
 	"github.com/lsxiaoxin/GoClaw/internal/config"
+	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/llm"
 	"github.com/lsxiaoxin/GoClaw/internal/server"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
@@ -71,7 +72,7 @@ func run() error {
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s03-permission",
+		"stage", "s04-hooks",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
@@ -105,7 +106,12 @@ func newToolRegistry(cfg config.Config) (*goclawtool.Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob)
+	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob)
+	if err != nil {
+		return nil, err
+	}
+	registry.SetHooks(hooks.NewBus(cfg.Hooks, nil))
+	return registry, nil
 }
 
 func newChannel(cfg config.Config, logger *slog.Logger) (channel.Channel, error) {

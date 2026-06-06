@@ -279,7 +279,7 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		}
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s03-permission",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s04-hooks",
 		status,
 		session.Generation,
 		a.workspace,
