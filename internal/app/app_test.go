@@ -221,7 +221,7 @@ func TestAppStatusShowsTodoSummary(t *testing.T) {
 	responses := waitForResponses(t, responder, 1)
 	got := strings.Join(responses[0].Chunks, "")
 	for _, want := range []string{
-		"阶段：s06-subagent",
+		"阶段：s07-skill-loading",
 		"Todo：total=3 pending=1 in_progress=1 completed=1",
 	} {
 		if !strings.Contains(got, want) {

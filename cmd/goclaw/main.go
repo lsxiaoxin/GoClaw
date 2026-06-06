@@ -90,7 +90,7 @@ func run() error {
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s06-subagent",
+		"stage", "s07-skill-loading",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
