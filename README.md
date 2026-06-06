@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s10-system-prompt`
+当前阶段：`s11-error-recovery`
 
-> s10 已加入统一动态 System Prompt 构建器。GoClaw 会把身份、安全、workspace、
-> 工具、权限、Hooks、Skills、Memory、Todo 和上下文摘要按固定顺序组合。
+> s11 已加入错误分类、模型有限重试和最近错误摘要。GoClaw 会区分 model、tool、
+> permission、hook、compact、store 和 config 错误，并在 `/status` 展示最近错误。
 
 ## 学习方式
 
@@ -84,6 +84,10 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - `internal/prompt` 统一构建动态 System Prompt。
 - Prompt 明确危险工具需要权限、不能泄露 secret、不能越过 workspace。
 - Skills、Memory、Todo 和上下文 Summary 可按模块启用或禁用，不能覆盖安全规则。
+- `internal/recovery` 提供错误分类和 RetryPolicy。
+- 模型失败会有限重试，超过上限后返回清晰 `ModelError`。
+- 工具失败、权限拒绝和 Hook 阻断不会自动重试危险操作。
+- `/status` 展示最近错误摘要，便于用户理解恢复状态。
 
 ## 快速开始
 
@@ -225,6 +229,7 @@ internal/skill/             Skill 模型、加载器和关键词选择器
 internal/contextmgr/        会话历史、压缩策略、摘要器和持久化 Store
 internal/memory/            长期记忆模型、Markdown Store、选择器和敏感信息检测
 internal/prompt/            动态 System Prompt 构建器
+internal/recovery/          错误分类和重试策略
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置

@@ -216,4 +216,4 @@ go vet ./...
 - [x] s08 Context Compact
 - [x] s09 Memory
 - [x] s10 System Prompt
-- [ ] s11 Error Recovery
+- [x] s11 Error Recovery
