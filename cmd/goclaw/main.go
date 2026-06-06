@@ -19,6 +19,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/llm"
+	"github.com/lsxiaoxin/GoClaw/internal/memory"
 	"github.com/lsxiaoxin/GoClaw/internal/server"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
@@ -52,6 +53,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	memoryStore, err := memory.NewStore(cfg.DataDir + "/memory")
+	if err != nil {
+		return err
+	}
 	contextStore, err := contextmgr.NewStore(cfg.DataDir + "/context")
 	if err != nil {
 		return err
@@ -72,7 +77,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	tools, err := newToolRegistry(cfg, todoStore, agentModel, skills)
+	tools, err := newToolRegistry(cfg, todoStore, memoryStore, agentModel, skills)
 	if err != nil {
 		return err
 	}
@@ -81,6 +86,7 @@ func run() error {
 		cfg.Agent.MaxSteps,
 		tools,
 		agent.WithSkills(skill.NewSelector(skills)),
+		agent.WithMemory(memoryStore),
 	)
 	if err != nil {
 		return err
@@ -100,7 +106,7 @@ func run() error {
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s08-context-compact",
+		"stage", "s09-memory",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
@@ -112,6 +118,7 @@ func run() error {
 func newToolRegistry(
 	cfg config.Config,
 	todoStore *todo.Store,
+	memoryStore *memory.Store,
 	agentModel model.AgenticModel,
 	skills []skill.Skill,
 ) (*goclawtool.Registry, error) {
@@ -143,6 +150,14 @@ func newToolRegistry(
 	if err != nil {
 		return nil, err
 	}
+	memoryRead, err := goclawtool.NewMemoryRead(memoryStore)
+	if err != nil {
+		return nil, err
+	}
+	memoryWrite, err := goclawtool.NewMemoryWrite(memoryStore)
+	if err != nil {
+		return nil, err
+	}
 	childRegistry, err := goclawtool.NewRegistry(readFile, glob)
 	if err != nil {
 		return nil, err
@@ -160,7 +175,18 @@ func newToolRegistry(
 	if err != nil {
 		return nil, err
 	}
-	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob, todoWrite, task, loadSkill)
+	registry, err := goclawtool.NewRegistry(
+		bash,
+		readFile,
+		writeFile,
+		editFile,
+		glob,
+		todoWrite,
+		task,
+		loadSkill,
+		memoryRead,
+		memoryWrite,
+	)
 	if err != nil {
 		return nil, err
 	}

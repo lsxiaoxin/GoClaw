@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
+	"github.com/lsxiaoxin/GoClaw/internal/memory"
 	"github.com/lsxiaoxin/GoClaw/internal/permission"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
@@ -80,16 +81,23 @@ type SkillProvider interface {
 	Select(string) []skill.Skill
 }
 
+// MemoryProvider selects long-term memories before a run starts.
+type MemoryProvider interface {
+	Select(string, int) ([]memory.Entry, error)
+}
+
 // Runner executes the model, permission, and tool loop.
 type Runner struct {
 	model    model.AgenticModel
 	tools    *goclawtool.Registry
 	maxSteps int
 	skills   SkillProvider
+	memory   MemoryProvider
 }
 
 type runnerOptions struct {
 	skills SkillProvider
+	memory MemoryProvider
 }
 
 // Option customizes the agent runner.
@@ -99,6 +107,13 @@ type Option func(*runnerOptions)
 func WithSkills(skills SkillProvider) Option {
 	return func(options *runnerOptions) {
 		options.skills = skills
+	}
+}
+
+// WithMemory enables prompt-time memory selection.
+func WithMemory(memory MemoryProvider) Option {
+	return func(options *runnerOptions) {
+		options.memory = memory
 	}
 }
 
@@ -124,6 +139,7 @@ func New(agentModel model.AgenticModel, maxSteps int, tools *goclawtool.Registry
 		tools:    tools,
 		maxSteps: maxSteps,
 		skills:   options.skills,
+		memory:   options.memory,
 	}, nil
 }
 
@@ -152,6 +168,9 @@ func (r *Runner) StartWithHistory(
 
 func (r *Runner) initialMessages(history []contextmgr.Message, prompt string) []*schema.AgenticMessage {
 	messages := historyToAgenticMessages(history)
+	if memoryPrompt := r.memoryPrompt(prompt); memoryPrompt != "" {
+		messages = append([]*schema.AgenticMessage{schema.SystemAgenticMessage(memoryPrompt)}, messages...)
+	}
 	user := schema.UserAgenticMessage(prompt)
 	if r.skills == nil {
 		return append(messages, user)
@@ -161,6 +180,17 @@ func (r *Runner) initialMessages(history []contextmgr.Message, prompt string) []
 		return append(messages, user)
 	}
 	return append([]*schema.AgenticMessage{schema.SystemAgenticMessage(skillPrompt(selected))}, append(messages, user)...)
+}
+
+func (r *Runner) memoryPrompt(prompt string) string {
+	if r.memory == nil {
+		return ""
+	}
+	entries, err := r.memory.Select(prompt, 8)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	return memory.FormatPrompt(entries)
 }
 
 func skillPrompt(skills []skill.Skill) string {

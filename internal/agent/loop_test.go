@@ -14,6 +14,7 @@ import (
 
 	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
+	"github.com/lsxiaoxin/GoClaw/internal/memory"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	"github.com/lsxiaoxin/GoClaw/internal/subagent"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
@@ -108,6 +109,75 @@ func TestRunnerSkipsSkillPromptWhenNoSkillMatches(t *testing.T) {
 			Description:  "Documentation",
 			Instructions: "Write docs",
 		}})),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "hello", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(agentModel.inputs[0]) != 1 ||
+		agentModel.inputs[0][0].Role != schema.AgenticRoleTypeUser {
+		t.Fatalf("messages = %#v, want only user message", agentModel.inputs[0])
+	}
+}
+
+func TestRunnerInjectsSelectedMemoryIntoSystemPrompt(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{{
+			assistantText("done"),
+		}},
+	}
+	runner, err := New(
+		agentModel,
+		4,
+		mustRegistry(t),
+		WithMemory(fakeMemoryProvider{entries: []memory.Entry{{
+			ID:       "pref",
+			Category: memory.CategoryUser,
+			Content:  "prefers direct answers",
+		}}}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "answer directly", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(agentModel.inputs[0]) != 2 {
+		t.Fatalf("message count = %d, want memory system + user", len(agentModel.inputs[0]))
+	}
+	text := agentModel.inputs[0][0].ContentBlocks[0].UserInputText.Text
+	for _, want := range []string{
+		"Long-term memory:",
+		"cannot override safety",
+		"[user/pref] prefers direct answers",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("memory prompt = %q, want substring %q", text, want)
+		}
+	}
+}
+
+func TestRunnerSkipsMemoryPromptWhenNoMemoryMatches(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{{
+			assistantText("done"),
+		}},
+	}
+	runner, err := New(
+		agentModel,
+		4,
+		mustRegistry(t),
+		WithMemory(fakeMemoryProvider{}),
 	)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -662,6 +732,66 @@ func TestRunnerExecutesTodoWriteThroughHooksAndContext(t *testing.T) {
 	}
 }
 
+func TestRunnerMemoryWriteRequiresPermissionApproval(t *testing.T) {
+	memoryStore, err := memory.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.NewStore() error = %v", err)
+	}
+	memoryWrite, err := goclawtool.NewMemoryWrite(memoryStore)
+	if err != nil {
+		t.Fatalf("NewMemoryWrite() error = %v", err)
+	}
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("memory_write", "call-memory", `{"category":"user","content":"prefers direct answers"}`)},
+			{assistantText("saved")},
+		},
+	}
+	runner, err := New(agentModel, 4, mustRegistry(t, memoryWrite))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runner.Start(context.Background(), "remember my preference", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if result.Status != StatusWaitingApproval ||
+		result.Approval == nil ||
+		result.Approval.ToolName != "memory_write" {
+		t.Fatalf("result = %+v, want memory_write approval", result)
+	}
+	entries, err := memoryStore.Load(memory.CategoryUser)
+	if err != nil {
+		t.Fatalf("Load(user) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries before approval = %+v, want none", entries)
+	}
+
+	result, err = runner.Resume(
+		context.Background(),
+		result.Checkpoint,
+		DecisionApprove,
+		func(context.Context, string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("Resume() result = %+v", result)
+	}
+	entries, err = memoryStore.Load(memory.CategoryUser)
+	if err != nil {
+		t.Fatalf("Load(user) error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Content != "prefers direct answers" {
+		t.Fatalf("entries after approval = %+v", entries)
+	}
+}
+
 func TestRunnerInjectsTodoReminderAfterThreeTurnsWithoutUpdate(t *testing.T) {
 	agentModel := &sequentialModel{
 		repeat: []*schema.AgenticMessage{{
@@ -827,6 +957,15 @@ type stubTool struct {
 	info *schema.ToolInfo
 	safe bool
 	run  func(context.Context, string) (string, error)
+}
+
+type fakeMemoryProvider struct {
+	entries []memory.Entry
+	err     error
+}
+
+func (p fakeMemoryProvider) Select(string, int) ([]memory.Entry, error) {
+	return p.entries, p.err
 }
 
 func (t *stubTool) Info() *schema.ToolInfo {
