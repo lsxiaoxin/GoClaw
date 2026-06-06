@@ -49,6 +49,14 @@ func TestEngineAppliesPermissionLayers(t *testing.T) {
 			wantReason: "not clearly read-only",
 		},
 		{
+			name:       "memory write asks",
+			tool:       "memory_write",
+			arguments:  `{"category":"user","content":"prefers direct answers"}`,
+			validate:   valid,
+			want:       Ask,
+			wantReason: "persists long-term memory",
+		},
+		{
 			name:       "hard deny wins over validation",
 			tool:       "bash",
 			arguments:  `{"command":"sudo rm file"}`,

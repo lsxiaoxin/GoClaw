@@ -70,6 +70,8 @@ func ruleReason(toolName, arguments string) string {
 		return "write_file modifies workspace files"
 	case "edit_file":
 		return "edit_file modifies workspace files"
+	case "memory_write":
+		return "memory_write persists long-term memory"
 	case "bash":
 		command, ok := bashCommand(arguments)
 		if ok && ClearlyReadOnlyBash(command) {
