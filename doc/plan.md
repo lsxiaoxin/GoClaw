@@ -99,11 +99,12 @@ Agent Harness 的关键机制。每个阶段必须包含实现、测试、文档
 
 ### s04 Hooks
 
-- 加入 `UserPrompt`、`BeforeModel`、`AfterModel`、`BeforeTool`、
-  `AfterTool`、`Stop` 和 `Error` 事件。
-- 权限、审计日志和大输出处理通过 Hook 接入。
-- Hook 不得绕过硬拒绝规则。
-- 桥接 Eino callbacks，记录耗时和调用信息但不记录密钥。
+- 加入 `PreToolUse` 和 `PostToolUse` 工具生命周期事件。
+- Hook 支持精确工具名和 `*` 通配匹配。
+- `PreToolUse` 支持放行、阻断和注入提示。
+- `PostToolUse` 支持观察工具结果并注入提示。
+- Hook 不得绕过硬拒绝规则、非法参数校验或人工审批。
+- 默认只启用安全内置 Runner，外部 command Hook 保留接口但不默认执行。
 - 标签：`s04-hooks`。
 
 ### s05 TodoWrite
@@ -208,7 +209,7 @@ go vet ./...
 - [x] s01 Agent Loop
 - [x] s02 Tool Use
 - [x] s03 Permission
-- [ ] s04 Hooks
+- [x] s04 Hooks
 - [ ] s05 TodoWrite
 - [ ] s06 Subagent
 - [ ] s07 Skill Loading

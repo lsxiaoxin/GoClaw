@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s03-permission`
+当前阶段：`s04-hooks`
 
-> s03 已在工具执行前加入硬拒绝、规则判断、参数校验和人工审批，并支持等待审批
-> 状态持久化。Hooks 生命周期将在 s04 实现。
+> s04 已在权限系统之后加入 `PreToolUse` 和 `PostToolUse` Hook。Hook 可以匹配
+> 具体工具或 `*` 通配符，支持阻断工具执行和向模型后续上下文注入提示信息。
 
 ## 学习方式
 
@@ -23,7 +23,7 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - <https://github.com/shareAI-lab/learn-claude-code>
 - GoClaw 参考其根目录新版教程的前 11 章，但使用 Go、Eino 和 IM 场景重新设计。
 
-## s03 已实现
+## 已实现
 
 - 环境变量配置和校验。
 - OpenAI 兼容 Eino `AgenticModel` 工厂。
@@ -52,6 +52,13 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - 飞书优先发送带允许/拒绝按钮的审批卡片，文本命令作为后备。
 - 审批 checkpoint 保存在 `.goclaw/approvals/`，等待期间重启后仍可继续。
 - 审批只能由原任务发起人处理。
+- `PreToolUse` 和 `PostToolUse` Hook。
+- Hook 支持精确工具名和 `*` 通配匹配。
+- `PreToolUse` 可放行、阻断或注入提示；阻断时真实工具不会执行。
+- `PostToolUse` 可观察工具结果并注入提示。
+- Hook 执行有超时控制，错误和 panic 不会导致程序崩溃。
+- Hook 注入内容会进入后续模型上下文。
+- Hook 在权限系统之后运行，不能绕过硬拒绝、非法参数或人工审批。
 
 ## 快速开始
 
@@ -111,10 +118,37 @@ GoClaw 启动时自动读取当前目录的 `.env`。系统环境变量优先于
 | `GOCLAW_MAX_STEPS` | `8` | 单次 Agent 运行的最大模型调用步数 |
 | `GOCLAW_BASH_TIMEOUT` | `10s` | 单次 bash 命令超时 |
 | `GOCLAW_BASH_OUTPUT_LIMIT` | `65536` | bash 合并输出的最大字节数 |
+| `GOCLAW_HOOKS_CONFIG` | 空 | 可选 Hook JSON 配置路径；默认读取工作区 `.goclaw/hooks.json` |
 | `LLM_API_KEY` | 空 | OpenAI 兼容 API Key，启动时必填 |
 | `LLM_BASE_URL` | 空 | OpenAI 兼容 API Base URL |
 | `LLM_MODEL` | 空 | 模型名称，启动时必填 |
 | `LLM_TIMEOUT` | `120s` | 单次模型请求超时 |
+
+Hook 配置示例：
+
+```json
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "bash",
+      "builtin": "inject",
+      "timeout": "500ms",
+      "message": "About to run {{tool}} with {{arguments}}"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "*",
+      "builtin": "record",
+      "timeout": "500ms",
+      "message": "{{tool}} finished in {{elapsed}}"
+    }
+  ]
+}
+```
+
+当前默认只执行安全内置 Hook：`allow`、`block`、`inject`、`record`。配置中的
+外部 `command` 字段会被解析并保留接口，但不会默认执行不可信脚本。
 
 ## 飞书接入
 
@@ -154,6 +188,7 @@ cmd/goclaw/                 程序入口
 internal/agent/             Agent Loop
 internal/tool/              工具注册表、bash 和文件工具
 internal/permission/        权限规则和只读 Shell 分类
+internal/hooks/             工具执行前后的 HookBus、配置和内置 Runner
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置
