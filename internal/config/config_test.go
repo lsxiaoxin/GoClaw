@@ -2,12 +2,14 @@ package config
 
 import (
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
+	t.Chdir(t.TempDir())
 	workspace := t.TempDir()
 	t.Setenv("GOCLAW_WORKSPACE", workspace)
 	t.Setenv("GOCLAW_CHANNEL", "")
@@ -60,6 +62,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidAgentLimits(t *testing.T) {
+	t.Chdir(t.TempDir())
 	t.Setenv("GOCLAW_WORKSPACE", t.TempDir())
 	t.Setenv("GOCLAW_CHANNEL", ChannelCLI)
 	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
@@ -76,6 +79,7 @@ func TestLoadRejectsInvalidAgentLimits(t *testing.T) {
 }
 
 func TestLoadFeishuRequiresCredentialsAndAllowlist(t *testing.T) {
+	t.Chdir(t.TempDir())
 	t.Setenv("GOCLAW_WORKSPACE", t.TempDir())
 	t.Setenv("GOCLAW_CHANNEL", ChannelFeishu)
 	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
@@ -101,6 +105,7 @@ func TestLoadFeishuRequiresCredentialsAndAllowlist(t *testing.T) {
 }
 
 func TestLoadFeishuGroupsRequireAllowlist(t *testing.T) {
+	t.Chdir(t.TempDir())
 	t.Setenv("GOCLAW_WORKSPACE", t.TempDir())
 	t.Setenv("GOCLAW_CHANNEL", ChannelFeishu)
 	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
@@ -114,4 +119,67 @@ func TestLoadFeishuGroupsRequireAllowlist(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want group allowlist error")
 	}
+}
+
+func TestLoadReadsDotEnvAndPreservesProcessEnvironment(t *testing.T) {
+	directory := t.TempDir()
+	t.Chdir(directory)
+	workspace := t.TempDir()
+	content := "GOCLAW_WORKSPACE=" + workspace + "\n" +
+		"GOCLAW_CHANNEL=cli\n" +
+		"LLM_API_KEY=file-key\n" +
+		"LLM_BASE_URL=https://file.example/v1\n" +
+		"LLM_MODEL=file-model\n"
+	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile(.env) error = %v", err)
+	}
+	unsetEnv(t, "GOCLAW_WORKSPACE")
+	unsetEnv(t, "GOCLAW_CHANNEL")
+	unsetEnv(t, "LLM_API_KEY")
+	unsetEnv(t, "LLM_BASE_URL")
+	t.Setenv("LLM_MODEL", "process-model")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Workspace != workspace {
+		t.Fatalf("Workspace = %q, want %q", cfg.Workspace, workspace)
+	}
+	if cfg.LLM.APIKey != "file-key" {
+		t.Fatalf("LLM.APIKey = %q", cfg.LLM.APIKey)
+	}
+	if cfg.LLM.BaseURL != "https://file.example/v1" {
+		t.Fatalf("LLM.BaseURL = %q", cfg.LLM.BaseURL)
+	}
+	if cfg.LLM.Model != "process-model" {
+		t.Fatalf("LLM.Model = %q, want process environment value", cfg.LLM.Model)
+	}
+}
+
+func TestLoadRejectsInvalidDotEnv(t *testing.T) {
+	directory := t.TempDir()
+	t.Chdir(directory)
+	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte("INVALID LINE\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(.env) error = %v", err)
+	}
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid .env error")
+	}
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	value, exists := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("Unsetenv(%q) error = %v", key, err)
+	}
+	t.Cleanup(func() {
+		if exists {
+			_ = os.Setenv(key, value)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
 }

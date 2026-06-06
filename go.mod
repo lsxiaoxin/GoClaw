@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/cloudwego/eino v0.9.1
 	github.com/cloudwego/eino-ext/components/model/agenticopenai v0.2.1
+	github.com/joho/godotenv v1.5.1
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.4
 )
 

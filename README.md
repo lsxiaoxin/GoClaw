@@ -49,9 +49,8 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 运行本地 CLI：
 
 ```bash
-export LLM_API_KEY=your-key
-export LLM_BASE_URL=https://example.com/v1
-export LLM_MODEL=your-model
+cp .env.example .env
+# 编辑 .env，填写 LLM_API_KEY、LLM_BASE_URL 和 LLM_MODEL
 go run ./cmd/goclaw
 ```
 
@@ -72,10 +71,9 @@ hello
 
 ```bash
 cp .env.example .env
-set -a
-source .env
-set +a
 ```
+
+GoClaw 启动时自动读取当前目录的 `.env`。系统环境变量优先于 `.env` 中的同名配置。
 
 主要变量：
 

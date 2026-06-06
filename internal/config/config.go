@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -51,19 +54,24 @@ type FeishuConfig struct {
 	AllowedGroupIDs []string
 }
 
-// Load reads configuration from environment variables.
+// Load reads configuration from process environment variables and .env.
 func Load() (Config, error) {
-	workspace, err := resolveWorkspace(envOrDefault("GOCLAW_WORKSPACE", "."))
+	fileEnv, err := readDotEnv(".env")
 	if err != nil {
 		return Config{}, err
 	}
 
-	channel := strings.ToLower(strings.TrimSpace(envOrDefault("GOCLAW_CHANNEL", ChannelCLI)))
+	workspace, err := resolveWorkspace(envOrDefault(fileEnv, "GOCLAW_WORKSPACE", "."))
+	if err != nil {
+		return Config{}, err
+	}
+
+	channel := strings.ToLower(strings.TrimSpace(envOrDefault(fileEnv, "GOCLAW_CHANNEL", ChannelCLI)))
 	if channel != ChannelCLI && channel != ChannelFeishu {
 		return Config{}, fmt.Errorf("GOCLAW_CHANNEL must be %q or %q", ChannelCLI, ChannelFeishu)
 	}
 
-	dataDir := strings.TrimSpace(envOrDefault("GOCLAW_DATA_DIR", ".goclaw"))
+	dataDir := strings.TrimSpace(envOrDefault(fileEnv, "GOCLAW_DATA_DIR", ".goclaw"))
 	if !filepath.IsAbs(dataDir) {
 		dataDir = filepath.Join(workspace, dataDir)
 	}
@@ -72,29 +80,29 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("resolve GOCLAW_DATA_DIR: %w", err)
 	}
 
-	logLevel, err := parseLogLevel(envOrDefault("GOCLAW_LOG_LEVEL", "info"))
+	logLevel, err := parseLogLevel(envOrDefault(fileEnv, "GOCLAW_LOG_LEVEL", "info"))
 	if err != nil {
 		return Config{}, err
 	}
 
-	timeout, err := parseDuration(envOrDefault("LLM_TIMEOUT", "120s"))
+	timeout, err := parseDuration(envOrDefault(fileEnv, "LLM_TIMEOUT", "120s"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse LLM_TIMEOUT: %w", err)
 	}
-	maxSteps, err := parsePositiveInt(envOrDefault("GOCLAW_MAX_STEPS", "8"))
+	maxSteps, err := parsePositiveInt(envOrDefault(fileEnv, "GOCLAW_MAX_STEPS", "8"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse GOCLAW_MAX_STEPS: %w", err)
 	}
-	bashTimeout, err := parseDuration(envOrDefault("GOCLAW_BASH_TIMEOUT", "10s"))
+	bashTimeout, err := parseDuration(envOrDefault(fileEnv, "GOCLAW_BASH_TIMEOUT", "10s"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse GOCLAW_BASH_TIMEOUT: %w", err)
 	}
-	bashOutputLimit, err := parsePositiveInt(envOrDefault("GOCLAW_BASH_OUTPUT_LIMIT", "65536"))
+	bashOutputLimit, err := parsePositiveInt(envOrDefault(fileEnv, "GOCLAW_BASH_OUTPUT_LIMIT", "65536"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse GOCLAW_BASH_OUTPUT_LIMIT: %w", err)
 	}
 
-	enableGroups, err := parseBool(envOrDefault("FEISHU_ENABLE_GROUPS", "false"))
+	enableGroups, err := parseBool(envOrDefault(fileEnv, "FEISHU_ENABLE_GROUPS", "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse FEISHU_ENABLE_GROUPS: %w", err)
 	}
@@ -110,17 +118,17 @@ func Load() (Config, error) {
 			BashOutputLimit: bashOutputLimit,
 		},
 		LLM: LLMConfig{
-			APIKey:  strings.TrimSpace(os.Getenv("LLM_API_KEY")),
-			BaseURL: strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
-			Model:   strings.TrimSpace(os.Getenv("LLM_MODEL")),
+			APIKey:  strings.TrimSpace(envValue(fileEnv, "LLM_API_KEY")),
+			BaseURL: strings.TrimSpace(envValue(fileEnv, "LLM_BASE_URL")),
+			Model:   strings.TrimSpace(envValue(fileEnv, "LLM_MODEL")),
 			Timeout: timeout,
 		},
 		Feishu: FeishuConfig{
-			AppID:           strings.TrimSpace(os.Getenv("FEISHU_APP_ID")),
-			AppSecret:       strings.TrimSpace(os.Getenv("FEISHU_APP_SECRET")),
-			AllowedUserIDs:  splitCSV(os.Getenv("FEISHU_ALLOWED_USER_IDS")),
+			AppID:           strings.TrimSpace(envValue(fileEnv, "FEISHU_APP_ID")),
+			AppSecret:       strings.TrimSpace(envValue(fileEnv, "FEISHU_APP_SECRET")),
+			AllowedUserIDs:  splitCSV(envValue(fileEnv, "FEISHU_ALLOWED_USER_IDS")),
 			EnableGroups:    enableGroups,
-			AllowedGroupIDs: splitCSV(os.Getenv("FEISHU_ALLOWED_GROUP_IDS")),
+			AllowedGroupIDs: splitCSV(envValue(fileEnv, "FEISHU_ALLOWED_GROUP_IDS")),
 		},
 	}
 
@@ -128,6 +136,17 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func readDotEnv(path string) (map[string]string, error) {
+	values, err := godotenv.Read(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return values, nil
 }
 
 func (c Config) validateChannel() error {
@@ -226,9 +245,19 @@ func splitCSV(value string) []string {
 	return result
 }
 
-func envOrDefault(key, fallback string) string {
+func envOrDefault(fileEnv map[string]string, key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
+	if value, ok := fileEnv[key]; ok {
+		return value
+	}
 	return fallback
+}
+
+func envValue(fileEnv map[string]string, key string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fileEnv[key]
 }
