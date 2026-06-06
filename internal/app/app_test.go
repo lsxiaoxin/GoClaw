@@ -15,6 +15,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/channel/fake"
 	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
+	"github.com/lsxiaoxin/GoClaw/internal/recovery"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 )
@@ -224,8 +225,57 @@ func TestAppStatusShowsTodoSummary(t *testing.T) {
 	responses := waitForResponses(t, responder, 1)
 	got := strings.Join(responses[0].Chunks, "")
 	for _, want := range []string{
-		"阶段：s10-system-prompt",
+		"阶段：s11-error-recovery",
 		"Todo：total=3 pending=1 in_progress=1 completed=1",
+		"最近错误：none",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status response = %q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestAppStatusShowsRecentErrorSummary(t *testing.T) {
+	state, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	responder := fake.New()
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		&stubAgent{run: func(context.Context, string, func(context.Context, string) error) error {
+			return recovery.Wrap(recovery.ModelError, errors.New("model overloaded"))
+		}},
+		"/workspace",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-error-run",
+		MessageID: "message-error-run",
+		ChatID:    "chat-error",
+		Content:   "fail",
+	}); err != nil {
+		t.Fatalf("Handle(prompt) error = %v", err)
+	}
+	waitForResponses(t, responder, 1)
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-error-status",
+		MessageID: "message-error-status",
+		ChatID:    "chat-error",
+		Content:   "/status",
+	}); err != nil {
+		t.Fatalf("Handle(status) error = %v", err)
+	}
+
+	responses := waitForResponses(t, responder, 2)
+	got := responseText(t, responses, "message-error-status")
+	for _, want := range []string{
+		"最近错误：ModelError",
+		"model overloaded",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status response = %q, want substring %q", got, want)

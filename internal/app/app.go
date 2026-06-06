@@ -15,6 +15,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
+	"github.com/lsxiaoxin/GoClaw/internal/recovery"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 )
@@ -81,6 +82,7 @@ type App struct {
 	todos          TodoSummaryStore
 	contextStore   ContextHistoryStore
 	contextManager ContextManager
+	errors         *ErrorRecorder
 	logger         *slog.Logger
 }
 
@@ -101,6 +103,7 @@ func New(
 		runs:       runs,
 		agent:      agentRunner,
 		workspace:  workspace,
+		errors:     NewErrorRecorder(8),
 		logger:     logger,
 	}
 }
@@ -236,25 +239,31 @@ func (a *App) runAgent(
 	}
 	result, err := run(writer.Append)
 	if persistErr := a.persistContextHistory(ctx, message.ChatID, result); persistErr != nil {
+		a.errors.Record(message.ChatID, persistErr)
 		a.logger.WarnContext(ctx, "persist context history", "chat_id", message.ChatID, "error", persistErr)
 	}
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err != nil {
+		a.errors.Record(message.ChatID, err)
 		a.logAgentError(ctx, message, err)
 		if appendErr := writer.Append(closeCtx, agentErrorText(err)); appendErr != nil {
+			a.errors.Record(message.ChatID, appendErr)
 			a.logger.Error("append agent error", "chat_id", message.ChatID, "error", appendErr)
 		}
 	} else if result.Status == agent.StatusWaitingApproval {
 		if err := a.persistAndRequestApproval(closeCtx, writer, message, result); err != nil {
+			a.errors.Record(message.ChatID, recovery.Wrap(recovery.StoreError, err))
 			a.logger.Error("request tool approval", "chat_id", message.ChatID, "error", err)
 			if appendErr := writer.Append(closeCtx, "创建审批失败："+err.Error()); appendErr != nil {
+				a.errors.Record(message.ChatID, appendErr)
 				a.logger.Error("append approval error", "chat_id", message.ChatID, "error", appendErr)
 			}
 		}
 	}
 	if err := writer.Close(closeCtx); err != nil {
+		a.errors.Record(message.ChatID, err)
 		a.logger.Error("close agent reply stream", "chat_id", message.ChatID, "error", err)
 	}
 }
@@ -343,7 +352,7 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		}
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s10-system-prompt\nTodo：total=%d pending=%d in_progress=%d completed=%d",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s11-error-recovery\nTodo：total=%d pending=%d in_progress=%d completed=%d\n最近错误：%s",
 		status,
 		session.Generation,
 		a.workspace,
@@ -351,6 +360,7 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		todoSummary.Pending,
 		todoSummary.InProgress,
 		todoSummary.Completed,
+		a.recentErrorSummary(message.ChatID),
 	))
 }
 
@@ -401,6 +411,17 @@ func (a *App) persistContextHistory(ctx context.Context, chatID string, result a
 		return err
 	}
 	return a.contextStore.Save(compacted)
+}
+
+func (a *App) recentErrorSummary(chatID string) string {
+	if a.errors == nil {
+		return "none"
+	}
+	summary := a.errors.Last(chatID)
+	if strings.TrimSpace(summary) == "" {
+		return "none"
+	}
+	return summary
 }
 
 func (a *App) contextTodoSummary(chatID string) (string, error) {
