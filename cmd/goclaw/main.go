@@ -44,6 +44,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	todoStore, err := todo.NewStore(cfg.DataDir + "/todos")
+	if err != nil {
+		return err
+	}
 	transport, err := newChannel(cfg, logger)
 	if err != nil {
 		return err
@@ -52,7 +56,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	tools, err := newToolRegistry(cfg)
+	tools, err := newToolRegistry(cfg, todoStore)
 	if err != nil {
 		return err
 	}
@@ -70,10 +74,11 @@ func run() error {
 		cfg.Workspace,
 		logger,
 	)
+	application.SetTodoStore(todoStore)
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s04-hooks",
+		"stage", "s05-todo-write",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
@@ -82,7 +87,7 @@ func run() error {
 	return server.Run(ctx, transport, application.Handle, logger)
 }
 
-func newToolRegistry(cfg config.Config) (*goclawtool.Registry, error) {
+func newToolRegistry(cfg config.Config, todoStore *todo.Store) (*goclawtool.Registry, error) {
 	bash, err := goclawtool.NewBash(
 		cfg.Workspace,
 		cfg.Agent.BashTimeout,
@@ -104,10 +109,6 @@ func newToolRegistry(cfg config.Config) (*goclawtool.Registry, error) {
 		return nil, err
 	}
 	glob, err := goclawtool.NewGlob(cfg.Workspace)
-	if err != nil {
-		return nil, err
-	}
-	todoStore, err := todo.NewStore(fmt.Sprintf("%s/todos", cfg.DataDir))
 	if err != nil {
 		return nil, err
 	}

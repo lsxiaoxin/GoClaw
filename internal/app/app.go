@@ -28,6 +28,11 @@ type SessionStore interface {
 	DeleteApproval(string, string) error
 }
 
+// TodoSummaryStore reads per-chat todo counts for status.
+type TodoSummaryStore interface {
+	Summary(string) (todo.Summary, error)
+}
+
 // AgentRunner executes and resumes Agent requests.
 type AgentRunner interface {
 	Start(context.Context, string, agent.TextEmitter) (agent.RunResult, error)
@@ -47,6 +52,7 @@ type App struct {
 	runs       *RunRegistry
 	agent      AgentRunner
 	workspace  string
+	todos      TodoSummaryStore
 	logger     *slog.Logger
 }
 
@@ -69,6 +75,11 @@ func New(
 		workspace:  workspace,
 		logger:     logger,
 	}
+}
+
+// SetTodoStore enables todo summary reporting in /status.
+func (a *App) SetTodoStore(todoStore TodoSummaryStore) {
+	a.todos = todoStore
 }
 
 // Handle processes one inbound message.
@@ -270,6 +281,14 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 	if err != nil {
 		return fmt.Errorf("load session: %w", err)
 	}
+	todoSummary := todo.Summary{}
+	if a.todos != nil {
+		var err error
+		todoSummary, err = a.todos.Summary(message.ChatID)
+		if err != nil {
+			return fmt.Errorf("load todo summary: %w", err)
+		}
+	}
 	status := session.Status
 	switch {
 	case a.runs.Running(message.ChatID):
@@ -282,10 +301,14 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		}
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s04-hooks",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s05-todo-write\nTodo：total=%d pending=%d in_progress=%d completed=%d",
 		status,
 		session.Generation,
 		a.workspace,
+		todoSummary.Total,
+		todoSummary.Pending,
+		todoSummary.InProgress,
+		todoSummary.Completed,
 	))
 }
 
