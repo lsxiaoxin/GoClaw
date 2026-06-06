@@ -55,10 +55,12 @@ type PendingCall struct {
 
 // Checkpoint contains everything required to continue after process restart.
 type Checkpoint struct {
-	Messages     []*schema.AgenticMessage `json:"messages"`
-	Steps        int                      `json:"steps"`
-	PendingCalls []PendingCall            `json:"pending_calls,omitempty"`
-	PendingIndex int                      `json:"pending_index,omitempty"`
+	Messages            []*schema.AgenticMessage `json:"messages"`
+	Steps               int                      `json:"steps"`
+	PendingCalls        []PendingCall            `json:"pending_calls,omitempty"`
+	PendingIndex        int                      `json:"pending_index,omitempty"`
+	TurnsSinceTodoWrite int                      `json:"turns_since_todo_write,omitempty"`
+	TodoReminderSent    bool                     `json:"todo_reminder_sent,omitempty"`
 }
 
 // RunResult describes a completed, suspended, cancelled, or failed run.
@@ -199,6 +201,10 @@ func (r *Runner) continueRun(
 		if checkpoint.Steps >= r.maxSteps {
 			return failedCheckpointResult(checkpoint, ErrMaxSteps)
 		}
+		if checkpoint.TurnsSinceTodoWrite >= 3 && !checkpoint.TodoReminderSent {
+			checkpoint.Messages = append(checkpoint.Messages, schema.UserAgenticMessage(todoReminderText))
+			checkpoint.TodoReminderSent = true
+		}
 
 		response, emitted, err := r.runModel(ctx, checkpoint.Messages, emit)
 		if err != nil {
@@ -212,11 +218,13 @@ func (r *Runner) continueRun(
 
 		calls := functionToolCalls(response)
 		if len(calls) == 0 {
+			checkpoint.markTodoProgress(false)
 			if emitted {
 				return RunResult{Status: StatusCompleted}, nil
 			}
 			continue
 		}
+		checkpoint.markTodoProgress(callsInclude(calls, "todo_write"))
 		checkpoint.PendingCalls = make([]PendingCall, len(calls))
 		for index, call := range calls {
 			checkpoint.PendingCalls[index] = PendingCall{
@@ -226,6 +234,17 @@ func (r *Runner) continueRun(
 			}
 		}
 	}
+}
+
+const todoReminderText = "Todo reminder: you have gone three model turns without updating todo_write. If the task has multiple steps, call todo_write to keep pending, in_progress, and completed items current."
+
+func (c *Checkpoint) markTodoProgress(updated bool) {
+	if updated {
+		c.TurnsSinceTodoWrite = 0
+		c.TodoReminderSent = false
+		return
+	}
+	c.TurnsSinceTodoWrite++
 }
 
 func (r *Runner) processPending(
@@ -396,6 +415,15 @@ func functionToolCalls(message *schema.AgenticMessage) []*schema.FunctionToolCal
 		}
 	}
 	return calls
+}
+
+func callsInclude(calls []*schema.FunctionToolCall, name string) bool {
+	for _, call := range calls {
+		if call != nil && call.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func functionToolResult(callID, name, result string) *schema.AgenticMessage {
