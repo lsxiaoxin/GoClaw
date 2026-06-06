@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s05-todo-write`
+当前阶段：`s06-subagent`
 
-> s05 已加入按会话持久化的 `todo_write` 工具。模型可以维护 `pending`、
-> `in_progress` 和 `completed` 任务，`/status` 会展示当前会话 Todo 摘要。
+> s06 已加入同步 `task` 子 Agent。主 Agent 可以委派只读调查任务，子 Agent 使用
+> 独立上下文运行，父 Agent 只接收最终摘要。
 
 ## 学习方式
 
@@ -65,6 +65,10 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - Todo 数据保存到 `.goclaw/todos/`，不同会话互相隔离。
 - `/status` 展示 Todo 总数和各状态计数。
 - 连续三轮未更新 Todo 时，Agent 会向后续模型上下文注入提醒。
+- `task` 工具可创建同步子 Agent 并返回结果摘要。
+- 子 Agent 默认只使用 `read_file` 和 `glob`，不污染父 Agent 上下文。
+- 子 Agent 工具调用仍经过权限和 Hook 管线。
+- 子 Agent 有最大递归深度和最大并发限制。
 
 ## 快速开始
 
@@ -101,6 +105,7 @@ hello
 
 写文件、编辑文件或执行非明确只读的 bash 时，GoClaw 会先要求人工审批。
 `todo_write` 作为普通工具执行，也会经过权限和 Hook 管线。
+`task` 默认用于只读调查，父 Agent 只会看到子 Agent 的摘要。
 
 运行状态默认保存在当前工作区的 `.goclaw/`，该目录不会提交到 Git。
 
@@ -197,6 +202,7 @@ internal/tool/              工具注册表、bash 和文件工具
 internal/permission/        权限规则和只读 Shell 分类
 internal/hooks/             工具执行前后的 HookBus、配置和内置 Runner
 internal/todo/              会话级 Todo 模型和持久化 Store
+internal/subagent/          子 Agent 请求、结果、深度和并发限制
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置

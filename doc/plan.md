@@ -211,7 +211,7 @@ go vet ./...
 - [x] s03 Permission
 - [x] s04 Hooks
 - [x] s05 TodoWrite
-- [ ] s06 Subagent
+- [x] s06 Subagent
 - [ ] s07 Skill Loading
 - [ ] s08 Context Compact
 - [ ] s09 Memory
