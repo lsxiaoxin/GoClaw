@@ -88,6 +88,38 @@ func TestSubagentExecutorReportsApprovalWithoutResuming(t *testing.T) {
 	}
 }
 
+func TestSubagentExecutorEnforcesDepthLimit(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{{
+			assistantText("unexpected"),
+		}},
+	}
+	executor, err := NewSubagentExecutor(
+		agentModel,
+		3,
+		mustRegistry(t),
+		WithSubagentLimits(subagent.Limits{MaxDepth: 1, MaxConcurrent: 1}),
+	)
+	if err != nil {
+		t.Fatalf("NewSubagentExecutor() error = %v", err)
+	}
+
+	result, err := executor.Execute(
+		subagent.WithDepth(context.Background(), 1),
+		subagent.Request{Prompt: "nested task"},
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != subagent.StatusFailed ||
+		!strings.Contains(result.Error, "max depth 1 exceeded") {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(agentModel.inputs) != 0 {
+		t.Fatalf("model calls = %d, want 0", len(agentModel.inputs))
+	}
+}
+
 func TestSubagentExecutorCancellationPropagates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

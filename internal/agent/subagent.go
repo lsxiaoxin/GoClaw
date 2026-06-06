@@ -17,6 +17,30 @@ type SubagentExecutor struct {
 	model    model.AgenticModel
 	maxSteps int
 	tools    *goclawtool.Registry
+	limits   subagent.Limits
+	limiter  *subagent.Limiter
+}
+
+type subagentExecutorOptions struct {
+	limits  subagent.Limits
+	limiter *subagent.Limiter
+}
+
+// SubagentOption customizes child-agent execution.
+type SubagentOption func(*subagentExecutorOptions)
+
+// WithSubagentLimits sets maximum nesting depth and concurrency.
+func WithSubagentLimits(limits subagent.Limits) SubagentOption {
+	return func(options *subagentExecutorOptions) {
+		options.limits = limits
+	}
+}
+
+// WithSubagentLimiter shares one concurrency limiter across executors.
+func WithSubagentLimiter(limiter *subagent.Limiter) SubagentOption {
+	return func(options *subagentExecutorOptions) {
+		options.limiter = limiter
+	}
 }
 
 // NewSubagentExecutor creates a child-agent executor.
@@ -24,6 +48,7 @@ func NewSubagentExecutor(
 	agentModel model.AgenticModel,
 	maxSteps int,
 	tools *goclawtool.Registry,
+	opts ...SubagentOption,
 ) (*SubagentExecutor, error) {
 	if agentModel == nil {
 		return nil, fmt.Errorf("agent model is required")
@@ -34,10 +59,32 @@ func NewSubagentExecutor(
 	if tools == nil {
 		return nil, fmt.Errorf("tool registry is required")
 	}
+	options := subagentExecutorOptions{limits: subagent.DefaultLimits()}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	limiter := options.limiter
+	limits := subagent.Limits{}
+	var err error
+	if limiter == nil {
+		limiter, limits, err = subagent.NewLimiter(options.limits)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		limits, err = options.limits.Normalize()
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &SubagentExecutor{
 		model:    agentModel,
 		maxSteps: maxSteps,
 		tools:    tools,
+		limits:   limits,
+		limiter:  limiter,
 	}, nil
 }
 
@@ -52,6 +99,18 @@ func (e *SubagentExecutor) Execute(
 	if err := ctx.Err(); err != nil {
 		return subagent.Result{Status: subagent.StatusCancelled, Error: err.Error()}, err
 	}
+	depth := subagent.DepthFromContext(ctx)
+	if depth >= e.limits.MaxDepth {
+		return subagent.Result{
+			Status: subagent.StatusFailed,
+			Error:  fmt.Sprintf("subagent max depth %d exceeded", e.limits.MaxDepth),
+		}, nil
+	}
+	release, err := e.limiter.Acquire(ctx)
+	if err != nil {
+		return subagent.Result{Status: subagent.StatusCancelled, Error: err.Error()}, err
+	}
+	defer release()
 
 	child, err := New(e.model, e.maxSteps, e.tools)
 	if err != nil {
@@ -59,7 +118,7 @@ func (e *SubagentExecutor) Execute(
 	}
 	var summary strings.Builder
 	result, err := child.Start(
-		subagent.WithDepth(ctx, subagent.DepthFromContext(ctx)+1),
+		subagent.WithDepth(ctx, depth+1),
 		childPrompt(request),
 		func(_ context.Context, text string) error {
 			_, writeErr := summary.WriteString(text)

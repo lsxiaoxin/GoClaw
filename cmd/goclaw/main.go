@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/cloudwego/eino/components/model"
+
 	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/app"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
@@ -56,7 +58,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	tools, err := newToolRegistry(cfg, todoStore)
+	tools, err := newToolRegistry(cfg, todoStore, agentModel)
 	if err != nil {
 		return err
 	}
@@ -87,7 +89,11 @@ func run() error {
 	return server.Run(ctx, transport, application.Handle, logger)
 }
 
-func newToolRegistry(cfg config.Config, todoStore *todo.Store) (*goclawtool.Registry, error) {
+func newToolRegistry(
+	cfg config.Config,
+	todoStore *todo.Store,
+	agentModel model.AgenticModel,
+) (*goclawtool.Registry, error) {
 	bash, err := goclawtool.NewBash(
 		cfg.Workspace,
 		cfg.Agent.BashTimeout,
@@ -116,7 +122,20 @@ func newToolRegistry(cfg config.Config, todoStore *todo.Store) (*goclawtool.Regi
 	if err != nil {
 		return nil, err
 	}
-	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob, todoWrite)
+	childRegistry, err := goclawtool.NewRegistry(readFile, glob)
+	if err != nil {
+		return nil, err
+	}
+	childRegistry.SetHooks(hooks.NewBus(cfg.Hooks, nil))
+	subagents, err := agent.NewSubagentExecutor(agentModel, cfg.Agent.MaxSteps, childRegistry)
+	if err != nil {
+		return nil, err
+	}
+	task, err := goclawtool.NewTask(subagents)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob, todoWrite, task)
 	if err != nil {
 		return nil, err
 	}
