@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s01-agent-loop`
+当前阶段：`s02-tool-use`
 
-> s01 已接入真实模型推理和受限 `bash` 工具。文件读写等结构化工具将在 s02
-> 实现。
+> s02 已建立工具注册表，并加入受工作区限制的文件读写、精确编辑和 glob 工具。
+> 人工审批与完整权限管线将在 s03 实现。
 
 ## 学习方式
 
@@ -23,7 +23,7 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - <https://github.com/shareAI-lab/learn-claude-code>
 - GoClaw 参考其根目录新版教程的前 11 章，但使用 Go、Eino 和 IM 场景重新设计。
 
-## s01 已实现
+## s02 已实现
 
 - 环境变量配置和校验。
 - OpenAI 兼容 Eino `AgenticModel` 工厂。
@@ -39,6 +39,11 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - `/cancel` 可取消模型请求和正在执行的 `bash`。
 - `bash` 在工作区执行，并带有超时、输出上限和硬拒绝规则。
 - 最大 step 上限，避免无终止条件的循环。
+- `ToolRegistry` 统一管理工具 Schema、严格参数校验和执行分发。
+- `read_file`、`write_file`、`edit_file` 和 `glob`。
+- 文件工具拒绝绝对路径、父目录逃逸和符号链接逃逸。
+- `edit_file` 只替换唯一的精确匹配，避免模糊修改。
+- 连续只读工具并发执行，写工具顺序执行，工具结果保持模型调用顺序。
 
 ## 快速开始
 
@@ -61,6 +66,14 @@ go run ./cmd/goclaw
 /status
 /new
 hello
+```
+
+也可以尝试：
+
+```text
+读取 README.md 并总结
+创建 notes/example.txt，写入 hello，然后读回来
+查找所有 **/*.go 文件
 ```
 
 运行状态默认保存在当前工作区的 `.goclaw/`，该目录不会提交到 Git。
@@ -126,7 +139,8 @@ make vet
 
 ```text
 cmd/goclaw/                 程序入口
-internal/agent/             Agent Loop 和受限 bash 工具
+internal/agent/             Agent Loop
+internal/tool/              工具注册表、bash 和文件工具
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置
