@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/cloudwego/eino v0.9.1
 	github.com/cloudwego/eino-ext/components/model/agenticopenai v0.2.1
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.4
 )
 
 require (
@@ -21,8 +22,10 @@ require (
 	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
