@@ -212,7 +212,7 @@ go vet ./...
 - [x] s04 Hooks
 - [x] s05 TodoWrite
 - [x] s06 Subagent
-- [ ] s07 Skill Loading
+- [x] s07 Skill Loading
 - [ ] s08 Context Compact
 - [ ] s09 Memory
 - [ ] s10 System Prompt
