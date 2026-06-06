@@ -43,3 +43,36 @@ func TestChannelReadsLinesAndStreamsReplies(t *testing.T) {
 		t.Fatalf("output = %q", output.String())
 	}
 }
+
+func TestChannelUsesUniqueEventIDsAcrossRestarts(t *testing.T) {
+	first := readOneMessage(t, New(
+		strings.NewReader("/help\n"),
+		io.Discard,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	second := readOneMessage(t, New(
+		strings.NewReader("/help\n"),
+		io.Discard,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+
+	if first.EventID == second.EventID {
+		t.Fatalf("EventID reused across CLI instances: %q", first.EventID)
+	}
+	if first.MessageID == second.MessageID {
+		t.Fatalf("MessageID reused across CLI instances: %q", first.MessageID)
+	}
+}
+
+func readOneMessage(t *testing.T, cli *Channel) channel.Message {
+	t.Helper()
+	var got channel.Message
+	err := cli.Start(context.Background(), func(_ context.Context, message channel.Message) error {
+		got = message
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	return got
+}

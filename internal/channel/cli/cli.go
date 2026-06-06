@@ -4,12 +4,16 @@ package cli
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 )
@@ -19,6 +23,7 @@ type Channel struct {
 	input  io.Reader
 	output io.Writer
 	logger *slog.Logger
+	runID  string
 	nextID atomic.Uint64
 	mu     sync.Mutex
 }
@@ -29,6 +34,7 @@ func New(input io.Reader, output io.Writer, logger *slog.Logger) *Channel {
 		input:  input,
 		output: output,
 		logger: logger,
+		runID:  newRunID(),
 	}
 }
 
@@ -53,8 +59,8 @@ func (c *Channel) Start(ctx context.Context, handler channel.Handler) error {
 		}
 		id := c.nextID.Add(1)
 		message := channel.Message{
-			EventID:   fmt.Sprintf("cli-event-%d", id),
-			MessageID: fmt.Sprintf("cli-message-%d", id),
+			EventID:   fmt.Sprintf("cli-event-%s-%d", c.runID, id),
+			MessageID: fmt.Sprintf("cli-message-%s-%d", c.runID, id),
 			ChatID:    "cli",
 			ChatType:  "p2p",
 			UserID:    "local",
@@ -69,6 +75,14 @@ func (c *Channel) Start(ctx context.Context, handler channel.Handler) error {
 		return fmt.Errorf("read CLI input: %w", err)
 	}
 	return nil
+}
+
+func newRunID() string {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err == nil {
+		return hex.EncodeToString(data[:])
+	}
+	return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 }
 
 // Stream creates a terminal reply stream.
