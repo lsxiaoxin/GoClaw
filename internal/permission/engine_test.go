@@ -84,8 +84,8 @@ func TestClearlyReadOnlyBashIsConservative(t *testing.T) {
 		"pwd",
 		"ls -la",
 		"rg TODO internal | head -20",
-		"git diff -- README.md",
-		"go test ./...",
+		"git status --short",
+		"go list ./...",
 		"find . -name '*.go'",
 	}
 	for _, command := range allowed {
@@ -97,10 +97,14 @@ func TestClearlyReadOnlyBashIsConservative(t *testing.T) {
 	asked := []string{
 		"echo hello > file",
 		"go build ./...",
+		"go test ./...",
 		"git checkout main",
+		"git diff -- README.md",
+		"awk 'BEGIN { system(\"rm file\") }'",
 		"sed -i s/a/b/ file",
 		"find . -delete",
 		"sort -o output input",
+		"rg --pre 'rm file' TODO",
 		"ls && rm file",
 		"cat $(which secret)",
 	}
@@ -114,6 +118,7 @@ func TestClearlyReadOnlyBashIsConservative(t *testing.T) {
 func TestHardDenyBash(t *testing.T) {
 	for _, command := range []string{
 		"sudo cat /etc/shadow",
+		`"sudo" cat /etc/shadow`,
 		"rm -rf /",
 		"mkfs.ext4 /dev/sda",
 		"dd if=/tmp/image of=/dev/sda",

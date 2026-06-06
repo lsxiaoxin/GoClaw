@@ -146,8 +146,7 @@ func (a *App) handleApproval(
 	if len(arguments) == 1 && arguments[0] != approval.ID {
 		return a.reply(ctx, message, "审批 ID 不匹配。")
 	}
-	if approval.RequestedBy != "" && message.UserID != "" &&
-		approval.RequestedBy != message.UserID {
+	if approval.RequestedBy != "" && approval.RequestedBy != message.UserID {
 		return a.reply(ctx, message, "只有发起任务的用户可以处理该审批。")
 	}
 
@@ -348,10 +347,7 @@ func newApprovalID() (string, error) {
 }
 
 func approvalText(request channel.ApprovalRequest) string {
-	arguments := request.Arguments
-	if len(arguments) > 2000 {
-		arguments = arguments[:2000] + "... (truncated)"
-	}
+	arguments := truncateText(request.Arguments, 2000)
 	return fmt.Sprintf(
 		"等待工具审批。\n审批 ID：%s\n原因：%s\n工具：%s\n参数：%s\n"+
 			"允许：/approve %s\n拒绝：/deny %s",
@@ -362,6 +358,14 @@ func approvalText(request channel.ApprovalRequest) string {
 		request.ID,
 		request.ID,
 	)
+}
+
+func truncateText(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "... (truncated)"
 }
 
 type agentReply struct {

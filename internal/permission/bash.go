@@ -10,9 +10,9 @@ var deniedBashPatterns = []struct {
 	pattern *regexp.Regexp
 	reason  string
 }{
-	{regexp.MustCompile(`(?i)(^|[\s;&|])(sudo)(\s|$)`), "privilege escalation is forbidden"},
-	{regexp.MustCompile(`(?i)(^|[\s;&|])(shutdown|reboot|poweroff|halt)(\s|$)`), "system power commands are forbidden"},
-	{regexp.MustCompile(`(?i)(^|[\s;&|])(mkfs(?:\.[a-z0-9]+)?|fdisk|parted)(\s|$)`), "disk formatting or partitioning is forbidden"},
+	{regexp.MustCompile(`(?i)\bsudo\b`), "privilege escalation is forbidden"},
+	{regexp.MustCompile(`(?i)\b(shutdown|reboot|poweroff|halt)\b`), "system power commands are forbidden"},
+	{regexp.MustCompile(`(?i)\b(mkfs(?:\.[a-z0-9]+)?|fdisk|parted)\b`), "disk formatting or partitioning is forbidden"},
 	{regexp.MustCompile(`(?i)\bdd\b[^\n;]*\bof\s*=\s*/dev/`), "raw device writes are forbidden"},
 	{regexp.MustCompile(`:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:`), "fork bombs are forbidden"},
 }
@@ -53,18 +53,16 @@ func readOnlyCommand(fields []string) bool {
 	args := fields[1:]
 	switch name {
 	case "pwd", "ls", "tree", "cat", "head", "tail", "wc", "uniq", "cut",
-		"tr", "grep", "rg", "ag", "awk", "du", "df", "stat", "file", "which",
+		"tr", "grep", "ag", "du", "df", "stat", "file", "which",
 		"whereis", "type", "realpath", "readlink", "basename", "dirname", "echo",
 		"printf":
 		return true
+	case "rg":
+		return !hasOption(args, "", "--pre") && !hasOption(args, "", "--pre-glob")
 	case "find":
 		return !containsAnyArgument(args,
 			"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprintf",
 		)
-	case "sed":
-		return !hasOption(args, "-i", "--in-place")
-	case "sort":
-		return !hasOption(args, "-o", "--output")
 	case "git":
 		return readOnlyGit(args)
 	case "go":
@@ -79,8 +77,7 @@ func readOnlyGit(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "status", "diff", "log", "show", "grep", "rev-parse", "ls-files",
-		"ls-tree", "describe":
+	case "status", "rev-parse", "ls-files", "ls-tree", "describe":
 		return true
 	default:
 		return false
@@ -92,7 +89,7 @@ func readOnlyGo(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "test", "vet", "list", "doc", "version":
+	case "list", "doc", "version":
 		return true
 	case "env":
 		return !containsAnyArgument(args[1:], "-w", "-u")
@@ -117,9 +114,9 @@ func hasOption(arguments []string, short, long string) bool {
 		if argument == long || strings.HasPrefix(argument, long+"=") {
 			return true
 		}
-		if argument == short ||
+		if short != "" && (argument == short ||
 			(strings.HasPrefix(argument, "-") && !strings.HasPrefix(argument, "--") &&
-				strings.Contains(argument[1:], strings.TrimPrefix(short, "-"))) {
+				strings.Contains(argument[1:], strings.TrimPrefix(short, "-")))) {
 			return true
 		}
 	}

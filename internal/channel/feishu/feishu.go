@@ -212,8 +212,9 @@ func approvalActionMessage(event *larktypes.CardActionEvent) (channel.Message, b
 
 func approvalCard(request channel.ApprovalRequest) (string, error) {
 	arguments := strings.ReplaceAll(request.Arguments, "```", "'''")
-	if len(arguments) > 2000 {
-		arguments = arguments[:2000] + "\n... (truncated)"
+	runes := []rune(arguments)
+	if len(runes) > 2000 {
+		arguments = string(runes[:2000]) + "\n... (truncated)"
 	}
 	card := map[string]any{
 		"config": map[string]any{
