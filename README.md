@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s09-memory`
+当前阶段：`s10-system-prompt`
 
-> s09 已加入长期 Memory。GoClaw 会从 `.goclaw/memory/` 读取长期记忆，
-> 按关键词注入相关条目，并通过 `memory_read` / `memory_write` 工具读写。
+> s10 已加入统一动态 System Prompt 构建器。GoClaw 会把身份、安全、workspace、
+> 工具、权限、Hooks、Skills、Memory、Todo 和上下文摘要按固定顺序组合。
 
 ## 学习方式
 
@@ -81,6 +81,9 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - Agent Run 前按关键词选择相关 memory，并注入长期记忆上下文。
 - `memory_read` 可读取相关记忆，`memory_write` 可写入长期记忆。
 - `memory_write` 必须经过人工审批，并拒绝 API key、token、password、secret、精确地址和身份证号等敏感内容。
+- `internal/prompt` 统一构建动态 System Prompt。
+- Prompt 明确危险工具需要权限、不能泄露 secret、不能越过 workspace。
+- Skills、Memory、Todo 和上下文 Summary 可按模块启用或禁用，不能覆盖安全规则。
 
 ## 快速开始
 
@@ -221,6 +224,7 @@ internal/subagent/          子 Agent 请求、结果、深度和并发限制
 internal/skill/             Skill 模型、加载器和关键词选择器
 internal/contextmgr/        会话历史、压缩策略、摘要器和持久化 Store
 internal/memory/            长期记忆模型、Markdown Store、选择器和敏感信息检测
+internal/prompt/            动态 System Prompt 构建器
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置

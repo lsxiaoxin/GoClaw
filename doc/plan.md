@@ -215,5 +215,5 @@ go vet ./...
 - [x] s07 Skill Loading
 - [x] s08 Context Compact
 - [x] s09 Memory
-- [ ] s10 System Prompt
+- [x] s10 System Prompt
 - [ ] s11 Error Recovery

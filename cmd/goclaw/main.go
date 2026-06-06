@@ -106,7 +106,7 @@ func run() error {
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s09-memory",
+		"stage", "s10-system-prompt",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
