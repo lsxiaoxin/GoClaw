@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
+	"github.com/lsxiaoxin/GoClaw/internal/todo"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
@@ -474,6 +476,84 @@ func TestRunnerDoesNotRunHooksForPermissionDeny(t *testing.T) {
 	}
 }
 
+func TestRunnerExecutesTodoWriteThroughHooksAndContext(t *testing.T) {
+	todoStore, err := todo.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	todoTool, err := goclawtool.NewTodoWrite(todoStore)
+	if err != nil {
+		t.Fatalf("NewTodoWrite() error = %v", err)
+	}
+	registry := mustRegistry(t, todoTool)
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "todo_write",
+		Builtin: hooks.BuiltinInject,
+		Timeout: time.Second,
+		Message: "pre {{tool}}",
+	}}}, nil))
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("todo_write", "call-todo", `{"items":[{"id":"todo-1","content":"write tests","status":"in_progress","priority":"high"}]}`)},
+			{assistantText("todos updated")},
+		},
+	}
+	runner, err := New(agentModel, 4, registry)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx := todo.WithChatID(context.Background(), "chat-1")
+	err = runner.Run(ctx, "track the work", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	items, err := todoStore.Load("chat-1")
+	if err != nil {
+		t.Fatalf("Load(chat-1) error = %v", err)
+	}
+	if len(items) != 1 ||
+		items[0].ID != "todo-1" ||
+		items[0].Status != todo.StatusInProgress ||
+		items[0].Priority != todo.PriorityHigh {
+		t.Fatalf("items = %+v", items)
+	}
+	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	want := "Updated 1 todos: 0 pending, 1 in_progress, 0 completed\nHook message: pre todo_write"
+	if got != want {
+		t.Fatalf("todo_write result = %q, want %q", got, want)
+	}
+}
+
+func TestRunnerInjectsTodoReminderAfterThreeTurnsWithoutUpdate(t *testing.T) {
+	agentModel := &sequentialModel{
+		repeat: []*schema.AgenticMessage{{
+			Role: schema.AgenticRoleTypeAssistant,
+		}},
+	}
+	runner, err := New(agentModel, 4, mustRegistry(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "multi-step task", func(context.Context, string) error {
+		return nil
+	})
+	if !errors.Is(err, ErrMaxSteps) {
+		t.Fatalf("Run() error = %v, want ErrMaxSteps", err)
+	}
+	if len(agentModel.inputs) != 4 {
+		t.Fatalf("model calls = %d, want 4", len(agentModel.inputs))
+	}
+	if !messagesContainText(agentModel.inputs[3], "Todo reminder:") {
+		t.Fatalf("fourth model input did not contain todo reminder: %#v", agentModel.inputs[3])
+	}
+}
+
 type sequentialModel struct {
 	responses [][]*schema.AgenticMessage
 	repeat    []*schema.AgenticMessage
@@ -563,4 +643,16 @@ func assistantToolCall(name, callID, arguments string) *schema.AgenticMessage {
 			}),
 		},
 	}
+}
+
+func messagesContainText(messages []*schema.AgenticMessage, text string) bool {
+	for _, message := range messages {
+		for _, block := range message.ContentBlocks {
+			if block != nil && block.UserInputText != nil &&
+				strings.Contains(block.UserInputText.Text, text) {
+				return true
+			}
+		}
+	}
+	return false
 }

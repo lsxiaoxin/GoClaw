@@ -13,6 +13,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/channel/fake"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
+	"github.com/lsxiaoxin/GoClaw/internal/todo"
 )
 
 func TestAppCommandsAndPersistentDeduplication(t *testing.T) {
@@ -169,6 +170,63 @@ func TestAppRejectsSecondRunForSameChat(t *testing.T) {
 	responses := waitForResponses(t, responder, 2)
 	if got := responseText(t, responses, "message-2"); !strings.Contains(got, "已有运行中的任务") {
 		t.Fatalf("second response = %q", got)
+	}
+}
+
+func TestAppStatusShowsTodoSummary(t *testing.T) {
+	state, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	todos, err := todo.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("todo.NewStore() error = %v", err)
+	}
+	if _, err := todos.Save("chat-1", []todo.Item{
+		{ID: "todo-1", Content: "pending", Status: todo.StatusPending, Priority: todo.PriorityHigh},
+		{ID: "todo-2", Content: "active", Status: todo.StatusInProgress, Priority: todo.PriorityMedium},
+		{ID: "todo-3", Content: "done", Status: todo.StatusCompleted, Priority: todo.PriorityLow},
+	}); err != nil {
+		t.Fatalf("Save(chat-1 todos) error = %v", err)
+	}
+	if _, err := todos.Save("chat-2", []todo.Item{
+		{ID: "todo-other", Content: "other", Status: todo.StatusPending, Priority: todo.PriorityLow},
+	}); err != nil {
+		t.Fatalf("Save(chat-2 todos) error = %v", err)
+	}
+
+	responder := fake.New()
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		&stubAgent{run: func(context.Context, string, func(context.Context, string) error) error {
+			return nil
+		}},
+		"/workspace",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	application.SetTodoStore(todos)
+
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-status-todo",
+		MessageID: "message-status-todo",
+		ChatID:    "chat-1",
+		Content:   "/status",
+	}); err != nil {
+		t.Fatalf("Handle(/status) error = %v", err)
+	}
+
+	responses := waitForResponses(t, responder, 1)
+	got := strings.Join(responses[0].Chunks, "")
+	for _, want := range []string{
+		"阶段：s05-todo-write",
+		"Todo：total=3 pending=1 in_progress=1 completed=1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status response = %q, want substring %q", got, want)
+		}
 	}
 }
 
