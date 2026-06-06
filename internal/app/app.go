@@ -3,9 +3,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
@@ -18,29 +20,40 @@ type SessionStore interface {
 	ResetSession(string) (store.Session, error)
 }
 
-// App handles normalized inbound messages.
-type App struct {
-	store     SessionStore
-	responder channel.Responder
-	runs      *RunRegistry
-	workspace string
-	logger    *slog.Logger
+// AgentRunner executes one user request.
+type AgentRunner interface {
+	Run(context.Context, string, func(context.Context, string) error) error
 }
 
-// New creates the s00 application.
+// App handles normalized inbound messages.
+type App struct {
+	runContext context.Context
+	store      SessionStore
+	responder  channel.Responder
+	runs       *RunRegistry
+	agent      AgentRunner
+	workspace  string
+	logger     *slog.Logger
+}
+
+// New creates the GoClaw application.
 func New(
+	runContext context.Context,
 	sessionStore SessionStore,
 	responder channel.Responder,
 	runs *RunRegistry,
+	agentRunner AgentRunner,
 	workspace string,
 	logger *slog.Logger,
 ) *App {
 	return &App{
-		store:     sessionStore,
-		responder: responder,
-		runs:      runs,
-		workspace: workspace,
-		logger:    logger,
+		runContext: runContext,
+		store:      sessionStore,
+		responder:  responder,
+		runs:       runs,
+		agent:      agentRunner,
+		workspace:  workspace,
+		logger:     logger,
 	}
 }
 
@@ -61,7 +74,7 @@ func (a *App) Handle(ctx context.Context, message channel.Message) error {
 
 	content := strings.TrimSpace(message.Content)
 	if !strings.HasPrefix(content, "/") {
-		return a.reply(ctx, message, "s00 已收到消息。Agent Loop 将在 s01 实现。输入 /help 查看命令。")
+		return a.handlePrompt(ctx, message, content)
 	}
 
 	command := strings.ToLower(strings.Fields(content)[0])
@@ -79,6 +92,64 @@ func (a *App) Handle(ctx context.Context, message channel.Message) error {
 	}
 }
 
+func (a *App) handlePrompt(ctx context.Context, message channel.Message, prompt string) error {
+	runCtx, finish, err := a.runs.Begin(a.runContext, message.ChatID)
+	if err != nil {
+		return a.reply(ctx, message, "当前已有运行中的任务。可使用 /cancel 取消。")
+	}
+
+	stream, err := a.responder.Stream(ctx, message, channel.StreamOptions{Title: "GoClaw"})
+	if err != nil {
+		finish()
+		return fmt.Errorf("create agent reply stream: %w", err)
+	}
+	go a.runAgent(runCtx, finish, stream, message, prompt)
+	return nil
+}
+
+func (a *App) runAgent(
+	ctx context.Context,
+	finish func(),
+	stream channel.Stream,
+	message channel.Message,
+	prompt string,
+) {
+	defer finish()
+
+	wrote := false
+	err := a.agent.Run(ctx, prompt, func(ctx context.Context, text string) error {
+		if err := stream.Append(ctx, text); err != nil {
+			return err
+		}
+		wrote = true
+		return nil
+	})
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			a.logger.ErrorContext(
+				ctx,
+				"agent run failed",
+				"chat_id", message.ChatID,
+				"message_id", message.MessageID,
+				"error", err,
+			)
+		}
+		text := agentErrorText(err)
+		if wrote {
+			text = "\n\n" + text
+		}
+		if appendErr := stream.Append(closeCtx, text); appendErr != nil {
+			a.logger.Error("append agent error", "chat_id", message.ChatID, "error", appendErr)
+		}
+	}
+	if err := stream.Close(closeCtx); err != nil {
+		a.logger.Error("close agent reply stream", "chat_id", message.ChatID, "error", err)
+	}
+}
+
 func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 	session, err := a.store.LoadSession(message.ChatID)
 	if err != nil {
@@ -89,11 +160,22 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		status = "running"
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s00-bootstrap",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s01-agent-loop",
 		status,
 		session.Generation,
 		a.workspace,
 	))
+}
+
+func agentErrorText(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "任务已取消。"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "任务执行超时。"
+	default:
+		return "Agent 运行失败：" + err.Error()
+	}
 }
 
 func (a *App) handleNew(ctx context.Context, message channel.Message) error {
@@ -127,9 +209,11 @@ func (a *App) reply(ctx context.Context, message channel.Message, text string) e
 	return nil
 }
 
-const helpText = `GoClaw s00 命令：
+const helpText = `GoClaw s01 命令：
 
 /help    查看帮助
 /status  查看当前会话状态
 /new     重置并创建新会话
-/cancel  取消当前运行中的任务`
+/cancel  取消当前运行中的任务
+
+普通消息会交给模型处理；当前仅提供受限 bash 工具。`

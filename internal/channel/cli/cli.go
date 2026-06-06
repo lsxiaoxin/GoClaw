@@ -39,7 +39,7 @@ func (c *Channel) Name() string {
 
 // Start reads terminal input until EOF or an unrecoverable scanner error.
 func (c *Channel) Start(ctx context.Context, handler channel.Handler) error {
-	c.writeLine("GoClaw s00 已启动。输入 /help 查看命令。")
+	c.writeLine("GoClaw s01 已启动。输入 /help 查看命令。")
 	scanner := bufio.NewScanner(c.input)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 

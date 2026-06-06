@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/channel/fake"
@@ -19,7 +20,19 @@ func TestAppCommandsAndPersistentDeduplication(t *testing.T) {
 	}
 	responder := fake.New()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	application := New(state, responder, NewRunRegistry(), "/workspace", logger)
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		&stubAgent{
+			run: func(ctx context.Context, _ string, emit func(context.Context, string) error) error {
+				return emit(ctx, "model reply")
+			},
+		},
+		"/workspace",
+		logger,
+	)
 
 	messages := []channel.Message{
 		{EventID: "event-help", MessageID: "message-1", ChatID: "chat-1", Content: "/help"},
@@ -37,7 +50,7 @@ func TestAppCommandsAndPersistentDeduplication(t *testing.T) {
 		t.Fatalf("Handle(duplicate) error = %v", err)
 	}
 
-	responses := responder.Responses()
+	responses := waitForResponses(t, responder, len(messages))
 	if len(responses) != len(messages) {
 		t.Fatalf("response count = %d, want %d", len(responses), len(messages))
 	}
@@ -49,7 +62,7 @@ func TestAppCommandsAndPersistentDeduplication(t *testing.T) {
 	if got := strings.Join(responses[2].Chunks, ""); !strings.Contains(got, "会话代次：1") {
 		t.Fatalf("status response = %q", got)
 	}
-	if got := strings.Join(responses[3].Chunks, ""); !strings.Contains(got, "s01") {
+	if got := strings.Join(responses[3].Chunks, ""); got != "model reply" {
 		t.Fatalf("plain response = %q", got)
 	}
 }
@@ -61,32 +74,139 @@ func TestAppCancelActiveRun(t *testing.T) {
 	}
 	responder := fake.New()
 	runs := NewRunRegistry()
-	runCtx, finish, err := runs.Begin(context.Background(), "chat-1")
-	if err != nil {
-		t.Fatalf("Begin() error = %v", err)
-	}
-	defer finish()
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
 	application := New(
+		context.Background(),
 		state,
 		responder,
 		runs,
+		&stubAgent{
+			run: func(ctx context.Context, _ string, _ func(context.Context, string) error) error {
+				close(started)
+				<-ctx.Done()
+				close(cancelled)
+				return ctx.Err()
+			},
+		},
 		"/workspace",
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 
 	err = application.Handle(context.Background(), channel.Message{
-		EventID:   "event-cancel",
+		EventID:   "event-prompt",
 		MessageID: "message-1",
+		ChatID:    "chat-1",
+		Content:   "keep running",
+	})
+	if err != nil {
+		t.Fatalf("Handle(prompt) error = %v", err)
+	}
+	waitForSignal(t, started, "agent start")
+
+	err = application.Handle(context.Background(), channel.Message{
+		EventID:   "event-cancel",
+		MessageID: "message-2",
 		ChatID:    "chat-1",
 		Content:   "/cancel",
 	})
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
+	waitForSignal(t, cancelled, "agent cancellation")
 
+	responses := waitForResponses(t, responder, 2)
+	if got := strings.Join(responses[0].Chunks, ""); got != "任务已取消。" {
+		t.Fatalf("agent response = %q", got)
+	}
+	if got := strings.Join(responses[1].Chunks, ""); got != "已取消当前任务。" {
+		t.Fatalf("cancel response = %q", got)
+	}
+}
+
+func TestAppRejectsSecondRunForSameChat(t *testing.T) {
+	state, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	responder := fake.New()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		&stubAgent{
+			run: func(ctx context.Context, _ string, emit func(context.Context, string) error) error {
+				close(started)
+				select {
+				case <-release:
+					return emit(ctx, "done")
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		},
+		"/workspace",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	first := channel.Message{EventID: "event-1", MessageID: "message-1", ChatID: "chat-1", Content: "first"}
+	if err := application.Handle(context.Background(), first); err != nil {
+		t.Fatalf("Handle(first) error = %v", err)
+	}
+	waitForSignal(t, started, "agent start")
+
+	second := channel.Message{EventID: "event-2", MessageID: "message-2", ChatID: "chat-1", Content: "second"}
+	if err := application.Handle(context.Background(), second); err != nil {
+		t.Fatalf("Handle(second) error = %v", err)
+	}
+	close(release)
+
+	responses := waitForResponses(t, responder, 2)
+	if got := strings.Join(responses[1].Chunks, ""); !strings.Contains(got, "已有运行中的任务") {
+		t.Fatalf("second response = %q", got)
+	}
+}
+
+type stubAgent struct {
+	run func(context.Context, string, func(context.Context, string) error) error
+}
+
+func (a *stubAgent) Run(
+	ctx context.Context,
+	prompt string,
+	emit func(context.Context, string) error,
+) error {
+	return a.run(ctx, prompt, emit)
+}
+
+func waitForResponses(t *testing.T, responder *fake.Channel, count int) []fake.Response {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		responses := responder.Responses()
+		if len(responses) >= count {
+			allClosed := true
+			for _, response := range responses[:count] {
+				allClosed = allClosed && response.Closed
+			}
+			if allClosed {
+				return responses
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d closed responses", count)
+	return nil
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
 	select {
-	case <-runCtx.Done():
-	default:
-		t.Fatal("run context was not cancelled")
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
 	}
 }
