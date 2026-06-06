@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s04-hooks`
+当前阶段：`s05-todo-write`
 
-> s04 已在权限系统之后加入 `PreToolUse` 和 `PostToolUse` Hook。Hook 可以匹配
-> 具体工具或 `*` 通配符，支持阻断工具执行和向模型后续上下文注入提示信息。
+> s05 已加入按会话持久化的 `todo_write` 工具。模型可以维护 `pending`、
+> `in_progress` 和 `completed` 任务，`/status` 会展示当前会话 Todo 摘要。
 
 ## 学习方式
 
@@ -59,6 +59,12 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - Hook 执行有超时控制，错误和 panic 不会导致程序崩溃。
 - Hook 注入内容会进入后续模型上下文。
 - Hook 在权限系统之后运行，不能绕过硬拒绝、非法参数或人工审批。
+- `todo_write` 按 chat/session 持久化任务列表。
+- Todo 支持 `pending`、`in_progress`、`completed` 和 `low/medium/high` 优先级。
+- 同一会话最多一个 Todo 处于 `in_progress`。
+- Todo 数据保存到 `.goclaw/todos/`，不同会话互相隔离。
+- `/status` 展示 Todo 总数和各状态计数。
+- 连续三轮未更新 Todo 时，Agent 会向后续模型上下文注入提醒。
 
 ## 快速开始
 
@@ -94,6 +100,7 @@ hello
 ```
 
 写文件、编辑文件或执行非明确只读的 bash 时，GoClaw 会先要求人工审批。
+`todo_write` 作为普通工具执行，也会经过权限和 Hook 管线。
 
 运行状态默认保存在当前工作区的 `.goclaw/`，该目录不会提交到 Git。
 
@@ -189,6 +196,7 @@ internal/agent/             Agent Loop
 internal/tool/              工具注册表、bash 和文件工具
 internal/permission/        权限规则和只读 Shell 分类
 internal/hooks/             工具执行前后的 HookBus、配置和内置 Runner
+internal/todo/              会话级 Todo 模型和持久化 Store
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置

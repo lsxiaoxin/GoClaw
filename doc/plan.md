@@ -210,7 +210,7 @@ go vet ./...
 - [x] s02 Tool Use
 - [x] s03 Permission
 - [x] s04 Hooks
-- [ ] s05 TodoWrite
+- [x] s05 TodoWrite
 - [ ] s06 Subagent
 - [ ] s07 Skill Loading
 - [ ] s08 Context Compact
