@@ -22,8 +22,16 @@ type Config struct {
 	Workspace string
 	DataDir   string
 	LogLevel  slog.Level
+	Agent     AgentConfig
 	LLM       LLMConfig
 	Feishu    FeishuConfig
+}
+
+// AgentConfig configures the model and tool loop.
+type AgentConfig struct {
+	MaxSteps        int
+	BashTimeout     time.Duration
+	BashOutputLimit int
 }
 
 // LLMConfig configures an OpenAI-compatible model endpoint.
@@ -73,6 +81,18 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse LLM_TIMEOUT: %w", err)
 	}
+	maxSteps, err := parsePositiveInt(envOrDefault("GOCLAW_MAX_STEPS", "8"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse GOCLAW_MAX_STEPS: %w", err)
+	}
+	bashTimeout, err := parseDuration(envOrDefault("GOCLAW_BASH_TIMEOUT", "10s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse GOCLAW_BASH_TIMEOUT: %w", err)
+	}
+	bashOutputLimit, err := parsePositiveInt(envOrDefault("GOCLAW_BASH_OUTPUT_LIMIT", "65536"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse GOCLAW_BASH_OUTPUT_LIMIT: %w", err)
+	}
 
 	enableGroups, err := parseBool(envOrDefault("FEISHU_ENABLE_GROUPS", "false"))
 	if err != nil {
@@ -84,6 +104,11 @@ func Load() (Config, error) {
 		Workspace: workspace,
 		DataDir:   dataDir,
 		LogLevel:  logLevel,
+		Agent: AgentConfig{
+			MaxSteps:        maxSteps,
+			BashTimeout:     bashTimeout,
+			BashOutputLimit: bashOutputLimit,
+		},
 		LLM: LLMConfig{
 			APIKey:  strings.TrimSpace(os.Getenv("LLM_API_KEY")),
 			BaseURL: strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
@@ -171,6 +196,17 @@ func parseDuration(value string) (time.Duration, error) {
 
 func parseBool(value string) (bool, error) {
 	return strconv.ParseBool(strings.TrimSpace(value))
+}
+
+func parsePositiveInt(value string) (int, error) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, err
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("value must be positive")
+	}
+	return parsed, nil
 }
 
 func splitCSV(value string) []string {

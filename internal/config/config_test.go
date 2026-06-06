@@ -13,12 +13,18 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("GOCLAW_CHANNEL", "")
 	t.Setenv("GOCLAW_DATA_DIR", "")
 	t.Setenv("GOCLAW_LOG_LEVEL", "")
+	t.Setenv("GOCLAW_MAX_STEPS", "")
+	t.Setenv("GOCLAW_BASH_TIMEOUT", "")
+	t.Setenv("GOCLAW_BASH_OUTPUT_LIMIT", "")
 	t.Setenv("LLM_TIMEOUT", "")
 	t.Setenv("FEISHU_ENABLE_GROUPS", "")
 
 	t.Setenv("GOCLAW_CHANNEL", ChannelCLI)
 	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
 	t.Setenv("GOCLAW_LOG_LEVEL", "info")
+	t.Setenv("GOCLAW_MAX_STEPS", "8")
+	t.Setenv("GOCLAW_BASH_TIMEOUT", "10s")
+	t.Setenv("GOCLAW_BASH_OUTPUT_LIMIT", "65536")
 	t.Setenv("LLM_TIMEOUT", "120s")
 	t.Setenv("FEISHU_ENABLE_GROUPS", "false")
 
@@ -41,6 +47,31 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.LLM.Timeout != 120*time.Second {
 		t.Fatalf("LLM.Timeout = %v", cfg.LLM.Timeout)
+	}
+	if cfg.Agent.MaxSteps != 8 {
+		t.Fatalf("Agent.MaxSteps = %d", cfg.Agent.MaxSteps)
+	}
+	if cfg.Agent.BashTimeout != 10*time.Second {
+		t.Fatalf("Agent.BashTimeout = %v", cfg.Agent.BashTimeout)
+	}
+	if cfg.Agent.BashOutputLimit != 65536 {
+		t.Fatalf("Agent.BashOutputLimit = %d", cfg.Agent.BashOutputLimit)
+	}
+}
+
+func TestLoadRejectsInvalidAgentLimits(t *testing.T) {
+	t.Setenv("GOCLAW_WORKSPACE", t.TempDir())
+	t.Setenv("GOCLAW_CHANNEL", ChannelCLI)
+	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
+	t.Setenv("GOCLAW_LOG_LEVEL", "info")
+	t.Setenv("LLM_TIMEOUT", "120s")
+	t.Setenv("FEISHU_ENABLE_GROUPS", "false")
+	t.Setenv("GOCLAW_MAX_STEPS", "0")
+	t.Setenv("GOCLAW_BASH_TIMEOUT", "10s")
+	t.Setenv("GOCLAW_BASH_OUTPUT_LIMIT", "65536")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want max steps error")
 	}
 }
 
