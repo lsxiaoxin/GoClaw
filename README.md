@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s08-context-compact`
+当前阶段：`s09-memory`
 
-> s08 已加入上下文历史持久化和压缩。GoClaw 会按 chat/session 保存历史，
-> 在超过阈值时保留 summary 和最近消息，并在下一轮 Agent Run 前注入上下文。
+> s09 已加入长期 Memory。GoClaw 会从 `.goclaw/memory/` 读取长期记忆，
+> 按关键词注入相关条目，并通过 `memory_read` / `memory_write` 工具读写。
 
 ## 学习方式
 
@@ -77,6 +77,10 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - 超过压缩策略阈值时，旧消息会被压缩为 summary，最近消息原样保留。
 - summary 会保留工具结果、关键错误和 Todo 状态摘要等运行信号。
 - 上下文压缩失败不会让 Agent 崩溃，会保存未压缩历史并记录日志。
+- `.goclaw/memory/` 支持 `user`、`feedback`、`project`、`reference` 四类 Markdown 记忆。
+- Agent Run 前按关键词选择相关 memory，并注入长期记忆上下文。
+- `memory_read` 可读取相关记忆，`memory_write` 可写入长期记忆。
+- `memory_write` 必须经过人工审批，并拒绝 API key、token、password、secret、精确地址和身份证号等敏感内容。
 
 ## 快速开始
 
@@ -116,6 +120,7 @@ hello
 `task` 默认用于只读调查，父 Agent 只会看到子 Agent 的摘要。
 `load_skill` 用于读取已配置 skill 的完整说明。
 上下文历史保存在 `.goclaw/context/`，不同会话互相隔离。
+长期记忆保存在 `.goclaw/memory/`，写入前需要人工审批。
 
 运行状态默认保存在当前工作区的 `.goclaw/`，该目录不会提交到 Git。
 
@@ -215,6 +220,7 @@ internal/todo/              会话级 Todo 模型和持久化 Store
 internal/subagent/          子 Agent 请求、结果、深度和并发限制
 internal/skill/             Skill 模型、加载器和关键词选择器
 internal/contextmgr/        会话历史、压缩策略、摘要器和持久化 Store
+internal/memory/            长期记忆模型、Markdown Store、选择器和敏感信息检测
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置

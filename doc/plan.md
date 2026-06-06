@@ -214,6 +214,6 @@ go vet ./...
 - [x] s06 Subagent
 - [x] s07 Skill Loading
 - [x] s08 Context Compact
-- [ ] s09 Memory
+- [x] s09 Memory
 - [ ] s10 System Prompt
 - [ ] s11 Error Recovery
