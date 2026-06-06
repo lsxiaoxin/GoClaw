@@ -204,7 +204,7 @@ go vet ./...
 
 ## 7. 当前进度
 
-- [ ] s00 工程启动
+- [x] s00 工程启动
 - [ ] s01 Agent Loop
 - [ ] s02 Tool Use
 - [ ] s03 Permission
@@ -216,4 +216,3 @@ go vet ./...
 - [ ] s09 Memory
 - [ ] s10 System Prompt
 - [ ] s11 Error Recovery
-
