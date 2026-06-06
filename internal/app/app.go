@@ -301,7 +301,7 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		}
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s05-todo-write\nTodo：total=%d pending=%d in_progress=%d completed=%d",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s06-subagent\nTodo：total=%d pending=%d in_progress=%d completed=%d",
 		status,
 		session.Generation,
 		a.workspace,
