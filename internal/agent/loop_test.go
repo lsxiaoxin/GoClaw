@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	"github.com/lsxiaoxin/GoClaw/internal/subagent"
@@ -124,6 +125,54 @@ func TestRunnerSkipsSkillPromptWhenNoSkillMatches(t *testing.T) {
 	}
 }
 
+func TestRunnerStartWithHistoryInjectsSummaryAndRecentMessages(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{{
+			assistantText("done"),
+		}},
+	}
+	runner, err := New(agentModel, 4, mustRegistry(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runner.StartWithHistory(
+		context.Background(),
+		[]contextmgr.Message{
+			{Role: contextmgr.RoleSummary, Content: "previously edited README"},
+			{Role: contextmgr.RoleUser, Content: "old user request"},
+			{Role: contextmgr.RoleAssistant, Content: "old assistant reply"},
+			{Role: contextmgr.RoleTool, Content: "read_file: old tool result"},
+		},
+		"continue",
+		func(context.Context, string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("StartWithHistory() error = %v", err)
+	}
+	if result.Status != StatusCompleted || result.Checkpoint == nil {
+		t.Fatalf("result = %+v, want completed with checkpoint", result)
+	}
+	input := agentModel.inputs[0]
+	if len(input) != 5 {
+		t.Fatalf("message count = %d, want history + prompt", len(input))
+	}
+	for _, want := range []string{
+		"Prior conversation summary:\npreviously edited README",
+		"old user request",
+		"old assistant reply",
+		"Previous tool result: read_file: old tool result",
+		"continue",
+	} {
+		if !messagesContainAnyText(input, want) {
+			t.Fatalf("model input missing %q: %#v", want, input)
+		}
+	}
+	if got := HistoryMessages(result.Checkpoint.Messages); !messagesContainHistory(got, contextmgr.RoleAssistant, "done") {
+		t.Fatalf("history messages = %#v, want assistant completion", got)
+	}
+}
+
 func TestRunnerExecutesToolAndReturnsResultToModel(t *testing.T) {
 	tool := &stubTool{
 		info: &schema.ToolInfo{Name: "bash"},
@@ -173,6 +222,11 @@ func TestRunnerExecutesToolAndReturnsResultToModel(t *testing.T) {
 	}
 	if got := result.Content[0].Text.Text; got != "/workspace" {
 		t.Fatalf("tool result text = %q", got)
+	}
+
+	history := HistoryMessages(secondInput)
+	if !messagesContainHistory(history, contextmgr.RoleTool, "bash: /workspace") {
+		t.Fatalf("history = %#v, want tool result", history)
 	}
 }
 
@@ -829,6 +883,31 @@ func messagesContainText(messages []*schema.AgenticMessage, text string) bool {
 				strings.Contains(block.UserInputText.Text, text) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func messagesContainAnyText(messages []*schema.AgenticMessage, text string) bool {
+	for _, message := range messages {
+		for _, block := range message.ContentBlocks {
+			switch {
+			case block != nil && block.UserInputText != nil &&
+				strings.Contains(block.UserInputText.Text, text):
+				return true
+			case block != nil && block.AssistantGenText != nil &&
+				strings.Contains(block.AssistantGenText.Text, text):
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func messagesContainHistory(messages []contextmgr.Message, role contextmgr.Role, text string) bool {
+	for _, message := range messages {
+		if message.Role == role && strings.Contains(message.Content, text) {
+			return true
 		}
 	}
 	return false

@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/permission"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
@@ -128,6 +129,16 @@ func New(agentModel model.AgenticModel, maxSteps int, tools *goclawtool.Registry
 
 // Start begins one user request.
 func (r *Runner) Start(ctx context.Context, prompt string, emit TextEmitter) (RunResult, error) {
+	return r.StartWithHistory(ctx, nil, prompt, emit)
+}
+
+// StartWithHistory begins one user request with compacted prior context.
+func (r *Runner) StartWithHistory(
+	ctx context.Context,
+	history []contextmgr.Message,
+	prompt string,
+	emit TextEmitter,
+) (RunResult, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return failedResult(fmt.Errorf("prompt is required"))
 	}
@@ -135,23 +146,21 @@ func (r *Runner) Start(ctx context.Context, prompt string, emit TextEmitter) (Ru
 		return failedResult(fmt.Errorf("text emitter is required"))
 	}
 
-	checkpoint := &Checkpoint{Messages: r.initialMessages(prompt)}
+	checkpoint := &Checkpoint{Messages: r.initialMessages(history, prompt)}
 	return r.continueRun(ctx, checkpoint, emit)
 }
 
-func (r *Runner) initialMessages(prompt string) []*schema.AgenticMessage {
+func (r *Runner) initialMessages(history []contextmgr.Message, prompt string) []*schema.AgenticMessage {
+	messages := historyToAgenticMessages(history)
 	user := schema.UserAgenticMessage(prompt)
 	if r.skills == nil {
-		return []*schema.AgenticMessage{user}
+		return append(messages, user)
 	}
 	selected := r.skills.Select(prompt)
 	if len(selected) == 0 {
-		return []*schema.AgenticMessage{user}
+		return append(messages, user)
 	}
-	return []*schema.AgenticMessage{
-		schema.SystemAgenticMessage(skillPrompt(selected)),
-		user,
-	}
+	return append([]*schema.AgenticMessage{schema.SystemAgenticMessage(skillPrompt(selected))}, append(messages, user)...)
 }
 
 func skillPrompt(skills []skill.Skill) string {
@@ -276,7 +285,7 @@ func (r *Runner) continueRun(
 		if len(calls) == 0 {
 			checkpoint.markTodoProgress(false)
 			if emitted {
-				return RunResult{Status: StatusCompleted}, nil
+				return RunResult{Status: StatusCompleted, Checkpoint: checkpoint}, nil
 			}
 			continue
 		}
@@ -412,6 +421,103 @@ func failedCheckpointResult(checkpoint *Checkpoint, err error) (RunResult, error
 
 func cancelledResult(checkpoint *Checkpoint, err error) (RunResult, error) {
 	return RunResult{Status: StatusCancelled, Checkpoint: checkpoint}, err
+}
+
+// HistoryMessages converts Agent messages into compactable conversation history.
+func HistoryMessages(messages []*schema.AgenticMessage) []contextmgr.Message {
+	var history []contextmgr.Message
+	for _, message := range messages {
+		role, content := contextMessage(message)
+		content = strings.TrimSpace(content)
+		if role == "" || content == "" {
+			continue
+		}
+		history = append(history, contextmgr.Message{
+			Role:    role,
+			Content: content,
+		})
+	}
+	return history
+}
+
+func historyToAgenticMessages(history []contextmgr.Message) []*schema.AgenticMessage {
+	var messages []*schema.AgenticMessage
+	for _, message := range history {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		switch message.Role {
+		case contextmgr.RoleSystem:
+			messages = append(messages, schema.SystemAgenticMessage(content))
+		case contextmgr.RoleUser:
+			messages = append(messages, schema.UserAgenticMessage(content))
+		case contextmgr.RoleAssistant:
+			messages = append(messages, &schema.AgenticMessage{
+				Role:          schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{schema.NewContentBlock(&schema.AssistantGenText{Text: content})},
+			})
+		case contextmgr.RoleTool:
+			messages = append(messages, schema.UserAgenticMessage("Previous tool result: "+content))
+		case contextmgr.RoleSummary:
+			messages = append(messages, schema.SystemAgenticMessage("Prior conversation summary:\n"+content))
+		}
+	}
+	return messages
+}
+
+func contextMessage(message *schema.AgenticMessage) (contextmgr.Role, string) {
+	if message == nil {
+		return "", ""
+	}
+	role := contextmgr.RoleUser
+	switch message.Role {
+	case schema.AgenticRoleTypeSystem:
+		role = contextmgr.RoleSystem
+	case schema.AgenticRoleTypeAssistant:
+		role = contextmgr.RoleAssistant
+	case schema.AgenticRoleTypeUser:
+		role = contextmgr.RoleUser
+	default:
+		return "", ""
+	}
+
+	var parts []string
+	for _, block := range message.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		switch {
+		case block.UserInputText != nil:
+			parts = append(parts, block.UserInputText.Text)
+		case block.AssistantGenText != nil:
+			parts = append(parts, block.AssistantGenText.Text)
+		case block.FunctionToolCall != nil:
+			parts = append(parts, "Tool call "+block.FunctionToolCall.Name+": "+block.FunctionToolCall.Arguments)
+		case block.FunctionToolResult != nil:
+			role = contextmgr.RoleTool
+			parts = append(parts, toolResultContent(block.FunctionToolResult))
+		}
+	}
+	return role, strings.Join(parts, "\n")
+}
+
+func toolResultContent(result *schema.FunctionToolResult) string {
+	if result == nil {
+		return ""
+	}
+	var parts []string
+	for _, content := range result.Content {
+		if content == nil || content.Text == nil {
+			continue
+		}
+		parts = append(parts, content.Text.Text)
+	}
+	text := strings.Join(parts, "\n")
+	if strings.TrimSpace(result.Name) == "" {
+		return text
+	}
+	return result.Name + ": " + text
 }
 
 func (r *Runner) runModel(
