@@ -18,6 +18,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("GOCLAW_MAX_STEPS", "")
 	t.Setenv("GOCLAW_BASH_TIMEOUT", "")
 	t.Setenv("GOCLAW_BASH_OUTPUT_LIMIT", "")
+	t.Setenv("GOCLAW_HOOKS_CONFIG", "")
 	t.Setenv("LLM_TIMEOUT", "")
 	t.Setenv("FEISHU_ENABLE_GROUPS", "")
 
@@ -58,6 +59,90 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Agent.BashOutputLimit != 65536 {
 		t.Fatalf("Agent.BashOutputLimit = %d", cfg.Agent.BashOutputLimit)
+	}
+	if !cfg.Hooks.Empty() {
+		t.Fatalf("Hooks = %+v, want empty", cfg.Hooks)
+	}
+}
+
+func TestLoadReadsDefaultHooksConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	workspace := t.TempDir()
+	t.Setenv("GOCLAW_WORKSPACE", workspace)
+	t.Setenv("GOCLAW_CHANNEL", ChannelCLI)
+	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
+	t.Setenv("GOCLAW_LOG_LEVEL", "info")
+	t.Setenv("GOCLAW_MAX_STEPS", "8")
+	t.Setenv("GOCLAW_BASH_TIMEOUT", "10s")
+	t.Setenv("GOCLAW_BASH_OUTPUT_LIMIT", "65536")
+	t.Setenv("GOCLAW_HOOKS_CONFIG", "")
+	t.Setenv("LLM_TIMEOUT", "120s")
+	t.Setenv("FEISHU_ENABLE_GROUPS", "false")
+
+	hookDir := filepath.Join(workspace, ".goclaw")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(.goclaw) error = %v", err)
+	}
+	content := `{
+		"hooks": [
+			{
+				"event": "PreToolUse",
+				"matcher": "bash",
+				"builtin": "inject",
+				"timeout": "250ms",
+				"message": "check {{tool}}"
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(hookDir, "hooks.json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile(hooks.json) error = %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Hooks.Hooks) != 1 {
+		t.Fatalf("hook count = %d, want 1", len(cfg.Hooks.Hooks))
+	}
+	if got := cfg.Hooks.Hooks[0]; got.Event != "PreToolUse" ||
+		got.Matcher != "bash" ||
+		got.Builtin != "inject" ||
+		got.Message != "check {{tool}}" ||
+		got.Timeout != 250*time.Millisecond {
+		t.Fatalf("hook = %+v", got)
+	}
+}
+
+func TestLoadReadsExplicitHooksConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	workspace := t.TempDir()
+	t.Setenv("GOCLAW_WORKSPACE", workspace)
+	t.Setenv("GOCLAW_CHANNEL", ChannelCLI)
+	t.Setenv("GOCLAW_DATA_DIR", ".goclaw")
+	t.Setenv("GOCLAW_LOG_LEVEL", "info")
+	t.Setenv("GOCLAW_MAX_STEPS", "8")
+	t.Setenv("GOCLAW_BASH_TIMEOUT", "10s")
+	t.Setenv("GOCLAW_BASH_OUTPUT_LIMIT", "65536")
+	t.Setenv("GOCLAW_HOOKS_CONFIG", "config/hooks.json")
+	t.Setenv("LLM_TIMEOUT", "120s")
+	t.Setenv("FEISHU_ENABLE_GROUPS", "false")
+
+	hookDir := filepath.Join(workspace, "config")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(config) error = %v", err)
+	}
+	content := `{"hooks":[{"event":"PostToolUse","matcher":"*","builtin":"record","message":"recorded"}]}`
+	if err := os.WriteFile(filepath.Join(hookDir, "hooks.json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile(hooks.json) error = %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Hooks.Hooks) != 1 || cfg.Hooks.Hooks[0].Matcher != "*" {
+		t.Fatalf("Hooks = %+v", cfg.Hooks)
 	}
 }
 

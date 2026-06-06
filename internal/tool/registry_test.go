@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/permission"
 )
 
@@ -179,6 +181,122 @@ func TestRegistryPermissionUsesToolValidation(t *testing.T) {
 	decision = registry.Permission(Call{Name: "missing", Arguments: `{}`})
 	if decision.Behavior != permission.Invalid {
 		t.Fatalf("unknown tool decision = %+v", decision)
+	}
+}
+
+func TestRegistryRunsHooksAroundAllowedTool(t *testing.T) {
+	registry, err := NewRegistry(&fakeTool{
+		name: "bash",
+		run: func(context.Context, string) (string, error) {
+			return "tool output", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{
+		{
+			Event:   hooks.PreToolUse,
+			Matcher: "bash",
+			Builtin: hooks.BuiltinInject,
+			Timeout: time.Second,
+			Message: "pre {{tool}}",
+		},
+		{
+			Event:   hooks.PostToolUse,
+			Matcher: "*",
+			Builtin: hooks.BuiltinInject,
+			Timeout: time.Second,
+			Message: "post {{tool}} {{output}}",
+		},
+	}}, nil))
+
+	results := registry.Execute(context.Background(), []Call{{
+		Name:      "bash",
+		Arguments: `{"command":"pwd"}`,
+	}})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("results = %#v", results)
+	}
+	if results[0].Output != "tool output" {
+		t.Fatalf("output = %q", results[0].Output)
+	}
+	wantMessages := []string{"pre bash", "post bash tool output"}
+	if !reflect.DeepEqual(results[0].HookMessages, wantMessages) {
+		t.Fatalf("hook messages = %#v, want %#v", results[0].HookMessages, wantMessages)
+	}
+}
+
+func TestRegistryHookBlockSkipsToolExecution(t *testing.T) {
+	var runs atomic.Int32
+	registry, err := NewRegistry(&fakeTool{
+		name: "bash",
+		run: func(context.Context, string) (string, error) {
+			runs.Add(1)
+			return "unexpected", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "bash",
+		Builtin: hooks.BuiltinBlock,
+		Timeout: time.Second,
+		Message: "blocked by policy",
+	}}}, nil))
+
+	results := registry.Execute(context.Background(), []Call{{
+		Name:      "bash",
+		Arguments: `{"command":"pwd"}`,
+	}})
+	if runs.Load() != 0 {
+		t.Fatalf("tool runs = %d, want 0", runs.Load())
+	}
+	if len(results) != 1 || results[0].Err != nil ||
+		results[0].Output != "Hook blocked: blocked by policy" {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestRegistryHookFailureDoesNotPanicOrSkipTool(t *testing.T) {
+	var runs atomic.Int32
+	registry, err := NewRegistry(&fakeTool{
+		name: "bash",
+		run: func(context.Context, string) (string, error) {
+			runs.Add(1)
+			return "tool output", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	runner := &hooks.FakeRunner{
+		Errors: map[string]error{
+			"PreToolUse:bash:bash": errors.New("hook failed"),
+		},
+	}
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "bash",
+		Builtin: hooks.BuiltinInject,
+		Timeout: time.Second,
+	}}}, runner))
+
+	results := registry.Execute(context.Background(), []Call{{
+		Name:      "bash",
+		Arguments: `{"command":"pwd"}`,
+	}})
+	if runs.Load() != 1 {
+		t.Fatalf("tool runs = %d, want 1", runs.Load())
+	}
+	if len(results) != 1 || results[0].Err != nil || results[0].Output != "tool output" {
+		t.Fatalf("results = %#v", results)
+	}
+	if len(results[0].HookMessages) != 1 ||
+		!strings.Contains(results[0].HookMessages[0], "hook failed") {
+		t.Fatalf("hook messages = %#v", results[0].HookMessages)
 	}
 }
 

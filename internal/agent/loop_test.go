@@ -6,10 +6,12 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
@@ -263,6 +265,212 @@ func TestRunnerResumesDeniedToolWithoutExecuting(t *testing.T) {
 	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
 	if got != "Permission denied by user." {
 		t.Fatalf("denied tool result = %q", got)
+	}
+}
+
+func TestRunnerIncludesHookMessagesInToolResultContext(t *testing.T) {
+	tool := &stubTool{
+		info: &schema.ToolInfo{Name: "bash"},
+		run: func(context.Context, string) (string, error) {
+			return "/workspace", nil
+		},
+	}
+	registry := mustRegistry(t, tool)
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{
+		{
+			Event:   hooks.PreToolUse,
+			Matcher: "bash",
+			Builtin: hooks.BuiltinInject,
+			Timeout: time.Second,
+			Message: "pre saw {{tool}}",
+		},
+		{
+			Event:   hooks.PostToolUse,
+			Matcher: "*",
+			Builtin: hooks.BuiltinInject,
+			Timeout: time.Second,
+			Message: "post saw {{output}}",
+		},
+	}}, nil))
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("bash", "call-1", `{"command":"pwd"}`)},
+			{assistantText("done")},
+		},
+	}
+	runner, err := New(agentModel, 4, registry)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "where am I?", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	want := "/workspace\nHook message: pre saw bash\nHook message: post saw /workspace"
+	if got != want {
+		t.Fatalf("tool result text = %q, want %q", got, want)
+	}
+}
+
+func TestRunnerHookBlockReturnsToolResultAndSkipsExecution(t *testing.T) {
+	var runs int
+	tool := &stubTool{
+		info: &schema.ToolInfo{Name: "bash"},
+		run: func(context.Context, string) (string, error) {
+			runs++
+			return "unexpected", nil
+		},
+	}
+	registry := mustRegistry(t, tool)
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "bash",
+		Builtin: hooks.BuiltinBlock,
+		Timeout: time.Second,
+		Message: "bash is disabled",
+	}}}, nil))
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("bash", "call-1", `{"command":"pwd"}`)},
+			{assistantText("blocked")},
+		},
+	}
+	runner, err := New(agentModel, 4, registry)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "run bash", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if runs != 0 {
+		t.Fatalf("tool runs = %d, want 0", runs)
+	}
+	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	if got != "Hook blocked: bash is disabled" {
+		t.Fatalf("tool result text = %q", got)
+	}
+}
+
+func TestRunnerDoesNotRunHooksForPermissionAskBeforeApproval(t *testing.T) {
+	var hookCalls int
+	write := &stubTool{
+		info: &schema.ToolInfo{Name: "write_file"},
+		run: func(context.Context, string) (string, error) {
+			return "write result", nil
+		},
+	}
+	registry := mustRegistry(t, write)
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "write_file",
+		Builtin: hooks.BuiltinInject,
+		Timeout: time.Second,
+		Message: "pre write",
+	}}}, &hooks.FakeRunner{
+		Wait: func(context.Context, hooks.Definition, hooks.Request) error {
+			hookCalls++
+			return nil
+		},
+	}))
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("write_file", "call-write", `{"path":"note.txt","content":"hello"}`)},
+			{assistantText("done")},
+		},
+	}
+	runner, err := New(agentModel, 4, registry)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runner.Start(context.Background(), "write", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if result.Status != StatusWaitingApproval {
+		t.Fatalf("Start() result = %+v", result)
+	}
+	if hookCalls != 0 {
+		t.Fatalf("hook calls before approval = %d, want 0", hookCalls)
+	}
+
+	result, err = runner.Resume(
+		context.Background(),
+		result.Checkpoint,
+		DecisionApprove,
+		func(context.Context, string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("Resume() result = %+v", result)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook calls after approval = %d, want 1", hookCalls)
+	}
+}
+
+func TestRunnerDoesNotRunHooksForPermissionDeny(t *testing.T) {
+	var hookCalls int
+	var toolRuns int
+	bash := &stubTool{
+		info: &schema.ToolInfo{Name: "bash"},
+		run: func(context.Context, string) (string, error) {
+			toolRuns++
+			return "unexpected", nil
+		},
+	}
+	registry := mustRegistry(t, bash)
+	registry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "bash",
+		Builtin: hooks.BuiltinInject,
+		Timeout: time.Second,
+		Message: "pre bash",
+	}}}, &hooks.FakeRunner{
+		Wait: func(context.Context, hooks.Definition, hooks.Request) error {
+			hookCalls++
+			return nil
+		},
+	}))
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("bash", "call-deny", `{"command":"sudo rm file"}`)},
+			{assistantText("denied")},
+		},
+	}
+	runner, err := New(agentModel, 4, registry)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "run denied command", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if hookCalls != 0 {
+		t.Fatalf("hook calls = %d, want 0", hookCalls)
+	}
+	if toolRuns != 0 {
+		t.Fatalf("tool runs = %d, want 0", toolRuns)
+	}
+	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	if got != "Permission denied: privilege escalation is forbidden" {
+		t.Fatalf("tool result text = %q", got)
 	}
 }
 
