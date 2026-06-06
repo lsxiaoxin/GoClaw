@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -15,6 +16,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/memory"
 	"github.com/lsxiaoxin/GoClaw/internal/permission"
 	"github.com/lsxiaoxin/GoClaw/internal/prompt"
+	"github.com/lsxiaoxin/GoClaw/internal/recovery"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
@@ -95,11 +97,13 @@ type Runner struct {
 	skills   SkillProvider
 	memory   MemoryProvider
 	prompts  prompt.Builder
+	retry    recovery.RetryPolicy
 }
 
 type runnerOptions struct {
 	skills SkillProvider
 	memory MemoryProvider
+	retry  recovery.RetryPolicy
 }
 
 // Option customizes the agent runner.
@@ -116,6 +120,13 @@ func WithSkills(skills SkillProvider) Option {
 func WithMemory(memory MemoryProvider) Option {
 	return func(options *runnerOptions) {
 		options.memory = memory
+	}
+}
+
+// WithRetryPolicy overrides model retry behavior.
+func WithRetryPolicy(policy recovery.RetryPolicy) Option {
+	return func(options *runnerOptions) {
+		options.retry = policy
 	}
 }
 
@@ -143,6 +154,7 @@ func New(agentModel model.AgenticModel, maxSteps int, tools *goclawtool.Registry
 		skills:   options.skills,
 		memory:   options.memory,
 		prompts:  prompt.NewBuilder(),
+		retry:    options.retry.Normalize(),
 	}, nil
 }
 
@@ -327,12 +339,12 @@ func (r *Runner) continueRun(
 			checkpoint.TodoReminderSent = true
 		}
 
-		response, emitted, err := r.runModel(ctx, checkpoint.Messages, emit)
+		response, emitted, err := r.runModelWithRetry(ctx, checkpoint.Messages, emit)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return cancelledResult(checkpoint, err)
 			}
-			return failedCheckpointResult(checkpoint, err)
+			return failedCheckpointResult(checkpoint, recovery.Wrap(recovery.ModelError, err))
 		}
 		checkpoint.Steps++
 		checkpoint.Messages = append(checkpoint.Messages, response)
@@ -629,6 +641,38 @@ func (r *Runner) runModel(
 		return nil, emitted, fmt.Errorf("join model response: %w", err)
 	}
 	return response, emitted, nil
+}
+
+func (r *Runner) runModelWithRetry(
+	ctx context.Context,
+	messages []*schema.AgenticMessage,
+	emit TextEmitter,
+) (*schema.AgenticMessage, bool, error) {
+	policy := r.retry.Normalize()
+	var last error
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		response, emitted, err := r.runModel(ctx, messages, emit)
+		if err == nil {
+			return response, emitted, nil
+		}
+		if emitted {
+			return nil, emitted, err
+		}
+		last = err
+		if !policy.ShouldRetry(recovery.ModelError, attempt) {
+			break
+		}
+		if backoff := policy.BackoffFor(attempt); backoff > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, false, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return nil, false, fmt.Errorf("model failed after %d attempt(s): %w", policy.MaxAttempts, last)
 }
 
 func functionToolCalls(message *schema.AgenticMessage) []*schema.FunctionToolCall {

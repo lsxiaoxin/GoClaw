@@ -15,6 +15,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/memory"
+	"github.com/lsxiaoxin/GoClaw/internal/recovery"
 	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	"github.com/lsxiaoxin/GoClaw/internal/subagent"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
@@ -319,6 +320,70 @@ func TestRunnerStopsAtMaxSteps(t *testing.T) {
 	}
 	if len(agentModel.inputs) != 3 {
 		t.Fatalf("model calls = %d, want 3", len(agentModel.inputs))
+	}
+}
+
+func TestRunnerRetriesModelFailure(t *testing.T) {
+	agentModel := &sequentialModel{
+		streamErrors: []error{errors.New("temporary model outage")},
+		responses: [][]*schema.AgenticMessage{
+			{assistantText("recovered")},
+		},
+	}
+	runner, err := New(
+		agentModel,
+		4,
+		mustRegistry(t),
+		WithRetryPolicy(recovery.RetryPolicy{MaxAttempts: 2}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output string
+	err = runner.Run(context.Background(), "hello", func(_ context.Context, text string) error {
+		output += text
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if output != "recovered" {
+		t.Fatalf("output = %q", output)
+	}
+	if len(agentModel.inputs) != 2 {
+		t.Fatalf("model attempts = %d, want 2", len(agentModel.inputs))
+	}
+}
+
+func TestRunnerStopsAfterModelRetryLimit(t *testing.T) {
+	agentModel := &sequentialModel{
+		streamErrors: []error{
+			errors.New("temporary model outage"),
+			errors.New("still down"),
+		},
+	}
+	runner, err := New(
+		agentModel,
+		4,
+		mustRegistry(t),
+		WithRetryPolicy(recovery.RetryPolicy{MaxAttempts: 2}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "hello", func(context.Context, string) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Run() error = nil")
+	}
+	if got := recovery.Classify(err); got != recovery.ModelError {
+		t.Fatalf("Classify(error) = %q, want ModelError; error = %v", got, err)
+	}
+	if len(agentModel.inputs) != 2 {
+		t.Fatalf("model attempts = %d, want 2", len(agentModel.inputs))
 	}
 }
 
@@ -916,10 +981,11 @@ func TestSubagentExecutorRunsChildToolThroughHooks(t *testing.T) {
 }
 
 type sequentialModel struct {
-	responses [][]*schema.AgenticMessage
-	repeat    []*schema.AgenticMessage
-	inputs    [][]*schema.AgenticMessage
-	toolNames [][]string
+	responses    [][]*schema.AgenticMessage
+	streamErrors []error
+	repeat       []*schema.AgenticMessage
+	inputs       [][]*schema.AgenticMessage
+	toolNames    [][]string
 }
 
 func (m *sequentialModel) Generate(
@@ -944,8 +1010,15 @@ func (m *sequentialModel) Stream(
 	m.toolNames = append(m.toolNames, names)
 
 	index := len(m.inputs) - 1
-	if index < len(m.responses) {
-		return schema.StreamReaderFromArray(m.responses[index]), nil
+	if index < len(m.streamErrors) && m.streamErrors[index] != nil {
+		return nil, m.streamErrors[index]
+	}
+	responseIndex := index
+	if len(m.streamErrors) > 0 {
+		responseIndex = index - len(m.streamErrors)
+	}
+	if responseIndex >= 0 && responseIndex < len(m.responses) {
+		return schema.StreamReaderFromArray(m.responses[responseIndex]), nil
 	}
 	if m.repeat != nil {
 		return schema.StreamReaderFromArray(m.repeat), nil
