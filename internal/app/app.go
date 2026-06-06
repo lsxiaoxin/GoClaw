@@ -15,6 +15,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
+	"github.com/lsxiaoxin/GoClaw/internal/todo"
 )
 
 // SessionStore is the persistent state used by the command router.
@@ -121,6 +122,7 @@ func (a *App) handlePrompt(ctx context.Context, message channel.Message, prompt 
 	if err != nil {
 		return a.reply(ctx, message, "当前已有运行中的任务。可使用 /cancel 取消。")
 	}
+	runCtx = todo.WithChatID(runCtx, message.ChatID)
 	go a.runAgent(runCtx, finish, message, func(emit agent.TextEmitter) (agent.RunResult, error) {
 		return a.agent.Start(runCtx, prompt, emit)
 	})
@@ -158,6 +160,7 @@ func (a *App) handleApproval(
 	if err != nil {
 		return a.reply(ctx, message, "当前已有运行中的任务。可使用 /cancel 取消。")
 	}
+	runCtx = todo.WithChatID(runCtx, message.ChatID)
 	if err := a.store.DeleteApproval(message.ChatID, approval.ID); err != nil {
 		finish()
 		return fmt.Errorf("delete approval before resume: %w", err)

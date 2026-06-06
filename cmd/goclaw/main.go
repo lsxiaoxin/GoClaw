@@ -18,6 +18,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/llm"
 	"github.com/lsxiaoxin/GoClaw/internal/server"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
+	"github.com/lsxiaoxin/GoClaw/internal/todo"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
@@ -106,7 +107,15 @@ func newToolRegistry(cfg config.Config) (*goclawtool.Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob)
+	todoStore, err := todo.NewStore(fmt.Sprintf("%s/todos", cfg.DataDir))
+	if err != nil {
+		return nil, err
+	}
+	todoWrite, err := goclawtool.NewTodoWrite(todoStore)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob, todoWrite)
 	if err != nil {
 		return nil, err
 	}
