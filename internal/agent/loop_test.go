@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
+	"github.com/lsxiaoxin/GoClaw/internal/subagent"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
@@ -551,6 +552,104 @@ func TestRunnerInjectsTodoReminderAfterThreeTurnsWithoutUpdate(t *testing.T) {
 	}
 	if !messagesContainText(agentModel.inputs[3], "Todo reminder:") {
 		t.Fatalf("fourth model input did not contain todo reminder: %#v", agentModel.inputs[3])
+	}
+}
+
+func TestRunnerExecutesTaskWithIsolatedSubagentContext(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("task", "call-task", `{"prompt":"read README","description":"docs"}`)},
+			{assistantText("child summary")},
+			{assistantText("parent done")},
+		},
+	}
+	childExecutor, err := NewSubagentExecutor(
+		agentModel,
+		3,
+		mustRegistry(t),
+		WithSubagentLimits(subagent.Limits{MaxDepth: 1, MaxConcurrent: 1}),
+	)
+	if err != nil {
+		t.Fatalf("NewSubagentExecutor() error = %v", err)
+	}
+	taskTool, err := goclawtool.NewTask(childExecutor)
+	if err != nil {
+		t.Fatalf("NewTask() error = %v", err)
+	}
+	runner, err := New(agentModel, 5, mustRegistry(t, taskTool))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output string
+	err = runner.Run(context.Background(), "delegate work", func(_ context.Context, text string) error {
+		output += text
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if output != "parent done" {
+		t.Fatalf("output = %q", output)
+	}
+	if len(agentModel.inputs) != 3 {
+		t.Fatalf("model calls = %d, want parent, child, parent", len(agentModel.inputs))
+	}
+	if childPrompt := agentModel.inputs[1][0].ContentBlocks[0].UserInputText.Text; !strings.Contains(childPrompt, "Subagent task: docs") {
+		t.Fatalf("child prompt = %q", childPrompt)
+	}
+	parentFollowup := agentModel.inputs[2]
+	if len(parentFollowup) != 3 {
+		t.Fatalf("parent followup messages = %d, want 3", len(parentFollowup))
+	}
+	if messagesContainText(parentFollowup, "Subagent task: docs") ||
+		messagesContainText(parentFollowup, "read README") {
+		t.Fatalf("parent context leaked child prompt: %#v", parentFollowup)
+	}
+	got := parentFollowup[2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	if got != "Subagent completed: child summary" {
+		t.Fatalf("task result = %q", got)
+	}
+}
+
+func TestSubagentExecutorRunsChildToolThroughHooks(t *testing.T) {
+	read := &stubTool{
+		info: &schema.ToolInfo{Name: "read_file"},
+		safe: true,
+		run: func(context.Context, string) (string, error) {
+			return "file content", nil
+		},
+	}
+	childRegistry := mustRegistry(t, read)
+	childRegistry.SetHooks(hooks.NewBus(hooks.Config{Hooks: []hooks.Definition{{
+		Event:   hooks.PreToolUse,
+		Matcher: "read_file",
+		Builtin: hooks.BuiltinInject,
+		Timeout: time.Second,
+		Message: "child hook {{tool}}",
+	}}}, nil))
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("read_file", "call-read", `{"path":"README.md"}`)},
+			{assistantText("child saw file")},
+		},
+	}
+	executor, err := NewSubagentExecutor(agentModel, 4, childRegistry)
+	if err != nil {
+		t.Fatalf("NewSubagentExecutor() error = %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), subagent.Request{Prompt: "inspect README"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != subagent.StatusCompleted || result.Summary != "child saw file" {
+		t.Fatalf("result = %+v", result)
+	}
+	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	want := "file content\nHook message: child hook read_file"
+	if got != want {
+		t.Fatalf("child tool result = %q, want %q", got, want)
 	}
 }
 
