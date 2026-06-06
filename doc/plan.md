@@ -207,7 +207,7 @@ go vet ./...
 - [x] s00 工程启动
 - [x] s01 Agent Loop
 - [x] s02 Tool Use
-- [ ] s03 Permission
+- [x] s03 Permission
 - [ ] s04 Hooks
 - [ ] s05 TodoWrite
 - [ ] s06 Subagent

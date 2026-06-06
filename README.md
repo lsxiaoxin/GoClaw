@@ -4,10 +4,10 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s02-tool-use`
+当前阶段：`s03-permission`
 
-> s02 已建立工具注册表，并加入受工作区限制的文件读写、精确编辑和 glob 工具。
-> 人工审批与完整权限管线将在 s03 实现。
+> s03 已在工具执行前加入硬拒绝、规则判断、参数校验和人工审批，并支持等待审批
+> 状态持久化。Hooks 生命周期将在 s04 实现。
 
 ## 学习方式
 
@@ -23,7 +23,7 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - <https://github.com/shareAI-lab/learn-claude-code>
 - GoClaw 参考其根目录新版教程的前 11 章，但使用 Go、Eino 和 IM 场景重新设计。
 
-## s02 已实现
+## s03 已实现
 
 - 环境变量配置和校验。
 - OpenAI 兼容 Eino `AgenticModel` 工厂。
@@ -31,7 +31,7 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - Event ID 跨进程持久化去重。
 - CLI、飞书 WebSocket 长连接和 Fake Channel。
 - 流式回复抽象。
-- `/help`、`/status`、`/new`、`/cancel`。
+- `/help`、`/status`、`/new`、`/cancel`、`/approve`、`/deny`。
 - 系统信号驱动的安全退出。
 - 模型调用、工具调用、工具结果回填和继续推理的 Agent Loop。
 - 模型文本通过 `Channel.Stream` 增量返回。
@@ -44,6 +44,14 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - 文件工具拒绝绝对路径、父目录逃逸和符号链接逃逸。
 - `edit_file` 只替换唯一的精确匹配，避免模糊修改。
 - 连续只读工具并发执行，写工具顺序执行，工具结果保持模型调用顺序。
+- 权限结果统一为 `allow`、`ask`、`deny` 和 `invalid`。
+- 危险系统命令走硬拒绝，不会进入人工审批。
+- `read_file`、`glob` 和明确只读的 bash 命令自动执行。
+- `write_file`、`edit_file` 和非明确只读 bash 命令必须审批。
+- `/approve [ID]`、`/deny [ID]`，以及 `/cancel` 取消待审批任务。
+- 飞书优先发送带允许/拒绝按钮的审批卡片，文本命令作为后备。
+- 审批 checkpoint 保存在 `.goclaw/approvals/`，等待期间重启后仍可继续。
+- 审批只能由原任务发起人处理。
 
 ## 快速开始
 
@@ -65,6 +73,8 @@ go run ./cmd/goclaw
 /help
 /status
 /new
+/approve
+/deny
 hello
 ```
 
@@ -75,6 +85,8 @@ hello
 创建 notes/example.txt，写入 hello，然后读回来
 查找所有 **/*.go 文件
 ```
+
+写文件、编辑文件或执行非明确只读的 bash 时，GoClaw 会先要求人工审批。
 
 运行状态默认保存在当前工作区的 `.goclaw/`，该目录不会提交到 Git。
 
@@ -141,12 +153,13 @@ make vet
 cmd/goclaw/                 程序入口
 internal/agent/             Agent Loop
 internal/tool/              工具注册表、bash 和文件工具
+internal/permission/        权限规则和只读 Shell 分类
 internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置
 internal/llm/               Eino 模型工厂
 internal/server/            Channel 生命周期
-internal/store/             JSON 状态和事件去重
+internal/store/             JSON 状态、事件去重和审批 checkpoint
 doc/plan.md                 长期实现计划
 doc/chapters/               分阶段代码导读
 ```
