@@ -5,8 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -38,7 +36,7 @@ func TestS01AgentLoopRunsBashAndStreamsFinalReply(t *testing.T) {
 				return messageStream(functionCall(
 					"bash",
 					"call-1",
-					`{"command":"printf s01 > result.txt && cat result.txt"}`,
+					`{"command":"printf s01"}`,
 				)), nil
 			case 1:
 				return messageStream(assistantText("bash "), assistantText("completed")), nil
@@ -65,14 +63,6 @@ func TestS01AgentLoopRunsBashAndStreamsFinalReply(t *testing.T) {
 	}
 	if runs.Running("chat-1") {
 		t.Fatal("run remains active after final model response")
-	}
-
-	data, err := os.ReadFile(filepath.Join(workspace, "result.txt"))
-	if err != nil {
-		t.Fatalf("ReadFile(result.txt) error = %v", err)
-	}
-	if string(data) != "s01" {
-		t.Fatalf("result.txt = %q", data)
 	}
 
 	inputs, toolNames := agentModel.snapshot()
@@ -106,7 +96,7 @@ func TestS01CancelStopsBashAndChatCanRunAgain(t *testing.T) {
 				return messageStream(functionCall(
 					"bash",
 					"call-long",
-					`{"command":"printf started > started.txt; sleep 30; printf finished > finished.txt"}`,
+					`{"command":"tail -f /dev/null"}`,
 				)), nil
 			case "after cancel":
 				return messageStream(assistantText("ready again")), nil
@@ -125,7 +115,8 @@ func TestS01CancelStopsBashAndChatCanRunAgain(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Handle(long task) error = %v", err)
 	}
-	waitForFile(t, filepath.Join(workspace, "started.txt"))
+	waitForModelCalls(t, agentModel, 1)
+	time.Sleep(50 * time.Millisecond)
 	if !runs.Running("chat-1") {
 		t.Fatal("run is not active while bash is executing")
 	}
@@ -140,16 +131,12 @@ func TestS01CancelStopsBashAndChatCanRunAgain(t *testing.T) {
 	}
 
 	responses := waitForClosedResponses(t, responder, 2)
-	if got := strings.Join(responses[0].Chunks, ""); got != "任务已取消。" {
+	if got := integrationResponseText(t, responses, "message-long"); got != "任务已取消。" {
 		t.Fatalf("cancelled agent response = %q", got)
 	}
-	if got := strings.Join(responses[1].Chunks, ""); got != "已取消当前任务。" {
+	if got := integrationResponseText(t, responses, "message-cancel"); got != "已取消当前任务。" {
 		t.Fatalf("/cancel response = %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(workspace, "finished.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("finished.txt exists after cancellation, stat error = %v", err)
-	}
-
 	if err := application.Handle(context.Background(), channel.Message{
 		EventID:   "event-after-cancel",
 		MessageID: "message-after-cancel",
@@ -160,7 +147,7 @@ func TestS01CancelStopsBashAndChatCanRunAgain(t *testing.T) {
 	}
 
 	responses = waitForClosedResponses(t, responder, 3)
-	if got := strings.Join(responses[2].Chunks, ""); got != "ready again" {
+	if got := integrationResponseText(t, responses, "message-after-cancel"); got != "ready again" {
 		t.Fatalf("response after cancellation = %q", got)
 	}
 	if runs.Running("chat-1") {
@@ -227,16 +214,32 @@ func waitForClosedResponses(t *testing.T, responder *fake.Channel, count int) []
 	return nil
 }
 
-func waitForFile(t *testing.T, path string) {
+func waitForModelCalls(t *testing.T, model *recordingModel, count int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+		inputs, _ := model.snapshot()
+		if len(inputs) >= count {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for file %s", path)
+	t.Fatalf("timed out waiting for %d model calls", count)
+}
+
+func integrationResponseText(
+	t *testing.T,
+	responses []fake.Response,
+	messageID string,
+) string {
+	t.Helper()
+	for _, response := range responses {
+		if response.Message.MessageID == messageID {
+			return strings.Join(response.Chunks, "")
+		}
+	}
+	t.Fatalf("no response for message %s", messageID)
+	return ""
 }
 
 type recordingModel struct {

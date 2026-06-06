@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/channel/fake"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
@@ -116,10 +118,10 @@ func TestAppCancelActiveRun(t *testing.T) {
 	waitForSignal(t, cancelled, "agent cancellation")
 
 	responses := waitForResponses(t, responder, 2)
-	if got := strings.Join(responses[0].Chunks, ""); got != "任务已取消。" {
+	if got := responseText(t, responses, "message-1"); got != "任务已取消。" {
 		t.Fatalf("agent response = %q", got)
 	}
-	if got := strings.Join(responses[1].Chunks, ""); got != "已取消当前任务。" {
+	if got := responseText(t, responses, "message-2"); got != "已取消当前任务。" {
 		t.Fatalf("cancel response = %q", got)
 	}
 }
@@ -165,7 +167,7 @@ func TestAppRejectsSecondRunForSameChat(t *testing.T) {
 	close(release)
 
 	responses := waitForResponses(t, responder, 2)
-	if got := strings.Join(responses[1].Chunks, ""); !strings.Contains(got, "已有运行中的任务") {
+	if got := responseText(t, responses, "message-2"); !strings.Contains(got, "已有运行中的任务") {
 		t.Fatalf("second response = %q", got)
 	}
 }
@@ -174,12 +176,25 @@ type stubAgent struct {
 	run func(context.Context, string, func(context.Context, string) error) error
 }
 
-func (a *stubAgent) Run(
+func (a *stubAgent) Start(
 	ctx context.Context,
 	prompt string,
-	emit func(context.Context, string) error,
-) error {
-	return a.run(ctx, prompt, emit)
+	emit agent.TextEmitter,
+) (agent.RunResult, error) {
+	err := a.run(ctx, prompt, emit)
+	if err != nil {
+		return agent.RunResult{Status: agent.StatusFailed}, err
+	}
+	return agent.RunResult{Status: agent.StatusCompleted}, nil
+}
+
+func (a *stubAgent) Resume(
+	context.Context,
+	*agent.Checkpoint,
+	agent.ApprovalDecision,
+	agent.TextEmitter,
+) (agent.RunResult, error) {
+	return agent.RunResult{Status: agent.StatusFailed}, errors.New("unexpected Resume call")
 }
 
 func waitForResponses(t *testing.T, responder *fake.Channel, count int) []fake.Response {
@@ -209,4 +224,15 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %s", name)
 	}
+}
+
+func responseText(t *testing.T, responses []fake.Response, messageID string) string {
+	t.Helper()
+	for _, response := range responses {
+		if response.Message.MessageID == messageID {
+			return strings.Join(response.Chunks, "")
+		}
+	}
+	t.Fatalf("no response for message %s", messageID)
+	return ""
 }

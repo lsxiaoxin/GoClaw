@@ -63,6 +63,7 @@ func New(root string, opts ...Option) (*Store, error) {
 		store.root,
 		filepath.Join(store.root, "events"),
 		filepath.Join(store.root, "sessions"),
+		filepath.Join(store.root, "approvals"),
 	} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create store directory %s: %w", dir, err)
@@ -169,6 +170,9 @@ func (s *Store) ResetSession(chatID string) (Session, error) {
 	session.Generation++
 	session.Status = sessionStatusIdle
 	if err := s.SaveSession(session); err != nil {
+		return Session{}, err
+	}
+	if err := s.DeleteApproval(chatID, ""); err != nil && !errors.Is(err, ErrApprovalNotFound) {
 		return Session{}, err
 	}
 	return session, nil

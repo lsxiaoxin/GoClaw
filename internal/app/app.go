@@ -3,12 +3,16 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
 )
@@ -18,11 +22,20 @@ type SessionStore interface {
 	RecordEvent(string) (bool, error)
 	LoadSession(string) (store.Session, error)
 	ResetSession(string) (store.Session, error)
+	SaveApproval(store.Approval) error
+	LoadApproval(string) (store.Approval, error)
+	DeleteApproval(string, string) error
 }
 
-// AgentRunner executes one user request.
+// AgentRunner executes and resumes Agent requests.
 type AgentRunner interface {
-	Run(context.Context, string, func(context.Context, string) error) error
+	Start(context.Context, string, agent.TextEmitter) (agent.RunResult, error)
+	Resume(
+		context.Context,
+		*agent.Checkpoint,
+		agent.ApprovalDecision,
+		agent.TextEmitter,
+	) (agent.RunResult, error)
 }
 
 // App handles normalized inbound messages.
@@ -77,7 +90,8 @@ func (a *App) Handle(ctx context.Context, message channel.Message) error {
 		return a.handlePrompt(ctx, message, content)
 	}
 
-	command := strings.ToLower(strings.Fields(content)[0])
+	fields := strings.Fields(content)
+	command := strings.ToLower(fields[0])
 	switch command {
 	case "/help":
 		return a.reply(ctx, message, helpText)
@@ -87,67 +101,166 @@ func (a *App) Handle(ctx context.Context, message channel.Message) error {
 		return a.handleNew(ctx, message)
 	case "/cancel":
 		return a.handleCancel(ctx, message)
+	case "/approve":
+		return a.handleApproval(ctx, message, fields[1:], agent.DecisionApprove)
+	case "/deny":
+		return a.handleApproval(ctx, message, fields[1:], agent.DecisionDeny)
 	default:
 		return a.reply(ctx, message, "未知命令。输入 /help 查看可用命令。")
 	}
 }
 
 func (a *App) handlePrompt(ctx context.Context, message channel.Message, prompt string) error {
+	if _, err := a.store.LoadApproval(message.ChatID); err == nil {
+		return a.reply(ctx, message, "当前有等待审批的任务。请使用 /approve 或 /deny 处理。")
+	} else if !errors.Is(err, store.ErrApprovalNotFound) {
+		return fmt.Errorf("load pending approval: %w", err)
+	}
+
 	runCtx, finish, err := a.runs.Begin(a.runContext, message.ChatID)
 	if err != nil {
 		return a.reply(ctx, message, "当前已有运行中的任务。可使用 /cancel 取消。")
 	}
+	go a.runAgent(runCtx, finish, message, func(emit agent.TextEmitter) (agent.RunResult, error) {
+		return a.agent.Start(runCtx, prompt, emit)
+	})
+	return nil
+}
 
-	stream, err := a.responder.Stream(ctx, message, channel.StreamOptions{Title: "GoClaw"})
-	if err != nil {
-		finish()
-		return fmt.Errorf("create agent reply stream: %w", err)
+func (a *App) handleApproval(
+	ctx context.Context,
+	message channel.Message,
+	arguments []string,
+	decision agent.ApprovalDecision,
+) error {
+	approval, err := a.store.LoadApproval(message.ChatID)
+	if errors.Is(err, store.ErrApprovalNotFound) {
+		return a.reply(ctx, message, "当前没有等待审批的任务。")
 	}
-	go a.runAgent(runCtx, finish, stream, message, prompt)
+	if err != nil {
+		return fmt.Errorf("load approval: %w", err)
+	}
+	if len(arguments) > 1 {
+		return a.reply(ctx, message, "审批命令格式：/approve [审批ID] 或 /deny [审批ID]。")
+	}
+	if len(arguments) == 1 && arguments[0] != approval.ID {
+		return a.reply(ctx, message, "审批 ID 不匹配。")
+	}
+	if approval.RequestedBy != "" && message.UserID != "" &&
+		approval.RequestedBy != message.UserID {
+		return a.reply(ctx, message, "只有发起任务的用户可以处理该审批。")
+	}
+
+	var checkpoint agent.Checkpoint
+	if err := json.Unmarshal(approval.Checkpoint, &checkpoint); err != nil {
+		return fmt.Errorf("decode approval checkpoint: %w", err)
+	}
+	runCtx, finish, err := a.runs.Begin(a.runContext, message.ChatID)
+	if err != nil {
+		return a.reply(ctx, message, "当前已有运行中的任务。可使用 /cancel 取消。")
+	}
+	if err := a.store.DeleteApproval(message.ChatID, approval.ID); err != nil {
+		finish()
+		return fmt.Errorf("delete approval before resume: %w", err)
+	}
+
+	go a.runAgent(runCtx, finish, message, func(emit agent.TextEmitter) (agent.RunResult, error) {
+		return a.agent.Resume(runCtx, &checkpoint, decision, emit)
+	})
 	return nil
 }
 
 func (a *App) runAgent(
 	ctx context.Context,
 	finish func(),
-	stream channel.Stream,
 	message channel.Message,
-	prompt string,
+	run func(agent.TextEmitter) (agent.RunResult, error),
 ) {
 	defer finish()
 
-	wrote := false
-	err := a.agent.Run(ctx, prompt, func(ctx context.Context, text string) error {
-		if err := stream.Append(ctx, text); err != nil {
-			return err
-		}
-		wrote = true
-		return nil
-	})
+	writer := &agentReply{
+		responder: a.responder,
+		message:   message,
+	}
+	result, err := run(writer.Append)
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			a.logger.ErrorContext(
-				ctx,
-				"agent run failed",
-				"chat_id", message.ChatID,
-				"message_id", message.MessageID,
-				"error", err,
-			)
-		}
-		text := agentErrorText(err)
-		if wrote {
-			text = "\n\n" + text
-		}
-		if appendErr := stream.Append(closeCtx, text); appendErr != nil {
+		a.logAgentError(ctx, message, err)
+		if appendErr := writer.Append(closeCtx, agentErrorText(err)); appendErr != nil {
 			a.logger.Error("append agent error", "chat_id", message.ChatID, "error", appendErr)
 		}
+	} else if result.Status == agent.StatusWaitingApproval {
+		if err := a.persistAndRequestApproval(closeCtx, writer, message, result); err != nil {
+			a.logger.Error("request tool approval", "chat_id", message.ChatID, "error", err)
+			if appendErr := writer.Append(closeCtx, "创建审批失败："+err.Error()); appendErr != nil {
+				a.logger.Error("append approval error", "chat_id", message.ChatID, "error", appendErr)
+			}
+		}
 	}
-	if err := stream.Close(closeCtx); err != nil {
+	if err := writer.Close(closeCtx); err != nil {
 		a.logger.Error("close agent reply stream", "chat_id", message.ChatID, "error", err)
 	}
+}
+
+func (a *App) persistAndRequestApproval(
+	ctx context.Context,
+	writer *agentReply,
+	message channel.Message,
+	result agent.RunResult,
+) error {
+	if result.Approval == nil || result.Checkpoint == nil {
+		return fmt.Errorf("Agent returned incomplete approval state")
+	}
+	checkpoint, err := json.Marshal(result.Checkpoint)
+	if err != nil {
+		return fmt.Errorf("encode approval checkpoint: %w", err)
+	}
+	approvalID, err := newApprovalID()
+	if err != nil {
+		return err
+	}
+	approval := store.Approval{
+		ID:          approvalID,
+		ChatID:      message.ChatID,
+		RequestedBy: message.UserID,
+		ToolName:    result.Approval.ToolName,
+		Arguments:   result.Approval.Arguments,
+		Reason:      result.Approval.Reason,
+		Checkpoint:  checkpoint,
+	}
+	if err := a.store.SaveApproval(approval); err != nil {
+		return fmt.Errorf("save approval: %w", err)
+	}
+
+	request := channel.ApprovalRequest{
+		ID:        approval.ID,
+		ToolName:  approval.ToolName,
+		Arguments: approval.Arguments,
+		Reason:    approval.Reason,
+	}
+	if native, ok := a.responder.(channel.ApprovalResponder); ok {
+		if err := native.RequestApproval(ctx, message, request); err == nil {
+			return nil
+		} else {
+			a.logger.Warn("native approval prompt failed; using text fallback", "error", err)
+		}
+	}
+	return writer.Append(ctx, approvalText(request))
+}
+
+func (a *App) logAgentError(ctx context.Context, message channel.Message, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	a.logger.ErrorContext(
+		ctx,
+		"agent run failed",
+		"chat_id", message.ChatID,
+		"message_id", message.MessageID,
+		"error", err,
+	)
 }
 
 func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
@@ -156,11 +269,18 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		return fmt.Errorf("load session: %w", err)
 	}
 	status := session.Status
-	if a.runs.Running(message.ChatID) {
+	switch {
+	case a.runs.Running(message.ChatID):
 		status = "running"
+	default:
+		if _, err := a.store.LoadApproval(message.ChatID); err == nil {
+			status = string(agent.StatusWaitingApproval)
+		} else if !errors.Is(err, store.ErrApprovalNotFound) {
+			return fmt.Errorf("load approval status: %w", err)
+		}
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s02-tool-use",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s03-permission",
 		status,
 		session.Generation,
 		a.workspace,
@@ -188,10 +308,20 @@ func (a *App) handleNew(ctx context.Context, message channel.Message) error {
 }
 
 func (a *App) handleCancel(ctx context.Context, message channel.Message) error {
-	if !a.runs.Cancel(message.ChatID) {
-		return a.reply(ctx, message, "当前没有运行中的任务。")
+	if a.runs.Cancel(message.ChatID) {
+		return a.reply(ctx, message, "已取消当前任务。")
 	}
-	return a.reply(ctx, message, "已取消当前任务。")
+	approval, err := a.store.LoadApproval(message.ChatID)
+	if errors.Is(err, store.ErrApprovalNotFound) {
+		return a.reply(ctx, message, "当前没有运行中或等待审批的任务。")
+	}
+	if err != nil {
+		return fmt.Errorf("load approval for cancellation: %w", err)
+	}
+	if err := a.store.DeleteApproval(message.ChatID, approval.ID); err != nil {
+		return fmt.Errorf("delete approval: %w", err)
+	}
+	return a.reply(ctx, message, "已取消等待审批的任务。")
 }
 
 func (a *App) reply(ctx context.Context, message channel.Message, text string) error {
@@ -209,11 +339,63 @@ func (a *App) reply(ctx context.Context, message channel.Message, text string) e
 	return nil
 }
 
-const helpText = `GoClaw s02 命令：
+func newApprovalID() (string, error) {
+	var data [8]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", fmt.Errorf("generate approval ID: %w", err)
+	}
+	return hex.EncodeToString(data[:]), nil
+}
 
-/help    查看帮助
-/status  查看当前会话状态
-/new     重置并创建新会话
-/cancel  取消当前运行中的任务
+func approvalText(request channel.ApprovalRequest) string {
+	arguments := request.Arguments
+	if len(arguments) > 2000 {
+		arguments = arguments[:2000] + "... (truncated)"
+	}
+	return fmt.Sprintf(
+		"等待工具审批。\n审批 ID：%s\n原因：%s\n工具：%s\n参数：%s\n"+
+			"允许：/approve %s\n拒绝：/deny %s",
+		request.ID,
+		request.Reason,
+		request.ToolName,
+		arguments,
+		request.ID,
+		request.ID,
+	)
+}
 
-普通消息会交给模型处理；当前提供 bash、read_file、write_file、edit_file 和 glob。`
+type agentReply struct {
+	responder channel.Responder
+	message   channel.Message
+	stream    channel.Stream
+}
+
+func (w *agentReply) Append(ctx context.Context, text string) error {
+	if w.stream == nil {
+		stream, err := w.responder.Stream(ctx, w.message, channel.StreamOptions{Title: "GoClaw"})
+		if err != nil {
+			return fmt.Errorf("create agent reply stream: %w", err)
+		}
+		w.stream = stream
+	}
+	return w.stream.Append(ctx, text)
+}
+
+func (w *agentReply) Close(ctx context.Context) error {
+	if w.stream == nil {
+		return nil
+	}
+	return w.stream.Close(ctx)
+}
+
+const helpText = `GoClaw s03 命令：
+
+/help          查看帮助
+/status        查看当前会话状态
+/new           重置并创建新会话
+/cancel        取消运行中或等待审批的任务
+/approve [ID]  允许待审批工具
+/deny [ID]     拒绝待审批工具
+
+普通消息会交给模型处理。读工具和明确只读的 bash 自动执行；写文件、编辑文件和
+非明确只读的 bash 需要人工审批。`

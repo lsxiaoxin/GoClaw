@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -138,6 +139,133 @@ func TestRunnerReturnsUnknownToolResultToModel(t *testing.T) {
 	}
 }
 
+func TestRunnerSuspendsAndResumesApprovedTool(t *testing.T) {
+	var writeRuns int
+	read := &stubTool{
+		info: &schema.ToolInfo{Name: "read_file"},
+		safe: true,
+		run: func(context.Context, string) (string, error) {
+			return "read result", nil
+		},
+	}
+	write := &stubTool{
+		info: &schema.ToolInfo{Name: "write_file"},
+		run: func(context.Context, string) (string, error) {
+			writeRuns++
+			return "write result", nil
+		},
+	}
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{
+				assistantToolCall("read_file", "call-read", `{"path":"README.md"}`),
+				assistantToolCall("write_file", "call-write", `{"path":"note.txt","content":"hello"}`),
+			},
+			{assistantText("done")},
+		},
+	}
+	runner, err := New(agentModel, 4, mustRegistry(t, read, write))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runner.Start(context.Background(), "update a file", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if result.Status != StatusWaitingApproval || result.Approval.ToolName != "write_file" {
+		t.Fatalf("Start() result = %+v", result)
+	}
+	if writeRuns != 0 {
+		t.Fatalf("write runs before approval = %d", writeRuns)
+	}
+	if len(result.Checkpoint.Messages) != 3 {
+		t.Fatalf("checkpoint messages = %d, want user + assistant + read result", len(result.Checkpoint.Messages))
+	}
+
+	data, err := json.Marshal(result.Checkpoint)
+	if err != nil {
+		t.Fatalf("Marshal(checkpoint) error = %v", err)
+	}
+	var restored Checkpoint
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("Unmarshal(checkpoint) error = %v", err)
+	}
+
+	var output string
+	result, err = runner.Resume(
+		context.Background(),
+		&restored,
+		DecisionApprove,
+		func(_ context.Context, text string) error {
+			output += text
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("Resume() result = %+v", result)
+	}
+	if writeRuns != 1 {
+		t.Fatalf("write runs after approval = %d", writeRuns)
+	}
+	if output != "done" {
+		t.Fatalf("output = %q", output)
+	}
+	got := agentModel.inputs[1][3].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	if got != "write result" {
+		t.Fatalf("approved tool result = %q", got)
+	}
+}
+
+func TestRunnerResumesDeniedToolWithoutExecuting(t *testing.T) {
+	var writeRuns int
+	write := &stubTool{
+		info: &schema.ToolInfo{Name: "write_file"},
+		run: func(context.Context, string) (string, error) {
+			writeRuns++
+			return "unexpected", nil
+		},
+	}
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{
+			{assistantToolCall("write_file", "call-write", `{"path":"note.txt","content":"hello"}`)},
+			{assistantText("not written")},
+		},
+	}
+	runner, err := New(agentModel, 4, mustRegistry(t, write))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runner.Start(context.Background(), "update a file", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	result, err = runner.Resume(
+		context.Background(),
+		result.Checkpoint,
+		DecisionDeny,
+		func(context.Context, string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if result.Status != StatusCompleted || writeRuns != 0 {
+		t.Fatalf("result = %+v, write runs = %d", result, writeRuns)
+	}
+	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+	if got != "Permission denied by user." {
+		t.Fatalf("denied tool result = %q", got)
+	}
+}
+
 type sequentialModel struct {
 	responses [][]*schema.AgenticMessage
 	repeat    []*schema.AgenticMessage
@@ -188,6 +316,10 @@ func (t *stubTool) Info() *schema.ToolInfo {
 
 func (t *stubTool) ConcurrencySafe() bool {
 	return t.safe
+}
+
+func (t *stubTool) Validate(string) error {
+	return nil
 }
 
 func (t *stubTool) Run(ctx context.Context, arguments string) (string, error) {

@@ -49,19 +49,30 @@ func (t *ReadFile) Info() *schema.ToolInfo { return t.info }
 
 func (t *ReadFile) ConcurrencySafe() bool { return true }
 
+// Validate checks read_file arguments and path containment without reading.
+func (t *ReadFile) Validate(arguments string) error {
+	input, err := readFileInputFrom(arguments)
+	if err != nil {
+		return err
+	}
+	resolved, err := t.paths.existing(input.Path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory")
+	}
+	return nil
+}
+
 func (t *ReadFile) Run(ctx context.Context, arguments string) (string, error) {
-	var input struct {
-		Path  string `json:"path"`
-		Limit *int   `json:"limit,omitempty"`
-	}
-	if err := decodeArguments(arguments, &input); err != nil {
+	input, err := readFileInputFrom(arguments)
+	if err != nil {
 		return "", err
-	}
-	if strings.TrimSpace(input.Path) == "" {
-		return "", fmt.Errorf("path is required")
-	}
-	if input.Limit != nil && *input.Limit <= 0 {
-		return "", fmt.Errorf("limit must be positive")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -88,6 +99,25 @@ func (t *ReadFile) Run(ctx context.Context, arguments string) (string, error) {
 	remaining := len(lines) - *input.Limit
 	return strings.Join(lines[:*input.Limit], "\n") +
 		fmt.Sprintf("\n... (%d more lines)", remaining), nil
+}
+
+type readFileInput struct {
+	Path  string `json:"path"`
+	Limit *int   `json:"limit,omitempty"`
+}
+
+func readFileInputFrom(arguments string) (readFileInput, error) {
+	var input readFileInput
+	if err := decodeArguments(arguments, &input); err != nil {
+		return readFileInput{}, err
+	}
+	if strings.TrimSpace(input.Path) == "" {
+		return readFileInput{}, fmt.Errorf("path is required")
+	}
+	if input.Limit != nil && *input.Limit <= 0 {
+		return readFileInput{}, fmt.Errorf("limit must be positive")
+	}
+	return input, nil
 }
 
 // WriteFile writes a complete file in the workspace.
@@ -127,19 +157,28 @@ func (t *WriteFile) Info() *schema.ToolInfo { return t.info }
 
 func (t *WriteFile) ConcurrencySafe() bool { return false }
 
+// Validate checks write_file arguments and path containment without writing.
+func (t *WriteFile) Validate(arguments string) error {
+	input, err := writeFileInputFrom(arguments)
+	if err != nil {
+		return err
+	}
+	resolved, err := t.paths.writable(input.Path)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+		return fmt.Errorf("path is a directory")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (t *WriteFile) Run(ctx context.Context, arguments string) (string, error) {
-	var input struct {
-		Path    string  `json:"path"`
-		Content *string `json:"content"`
-	}
-	if err := decodeArguments(arguments, &input); err != nil {
+	input, err := writeFileInputFrom(arguments)
+	if err != nil {
 		return "", err
-	}
-	if strings.TrimSpace(input.Path) == "" {
-		return "", fmt.Errorf("path is required")
-	}
-	if input.Content == nil {
-		return "", fmt.Errorf("content is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -152,6 +191,25 @@ func (t *WriteFile) Run(ctx context.Context, arguments string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(*input.Content), input.Path), nil
+}
+
+type writeFileInput struct {
+	Path    string  `json:"path"`
+	Content *string `json:"content"`
+}
+
+func writeFileInputFrom(arguments string) (writeFileInput, error) {
+	var input writeFileInput
+	if err := decodeArguments(arguments, &input); err != nil {
+		return writeFileInput{}, err
+	}
+	if strings.TrimSpace(input.Path) == "" {
+		return writeFileInput{}, fmt.Errorf("path is required")
+	}
+	if input.Content == nil {
+		return writeFileInput{}, fmt.Errorf("content is required")
+	}
+	return input, nil
 }
 
 // EditFile replaces one exact, unique text occurrence.
@@ -196,27 +254,54 @@ func (t *EditFile) Info() *schema.ToolInfo { return t.info }
 
 func (t *EditFile) ConcurrencySafe() bool { return false }
 
+// Validate checks edit_file arguments and exact-match semantics without writing.
+func (t *EditFile) Validate(arguments string) error {
+	input, err := editFileInputFrom(arguments)
+	if err != nil {
+		return err
+	}
+	_, err = t.edit(input, false)
+	return err
+}
+
 func (t *EditFile) Run(ctx context.Context, arguments string) (string, error) {
-	var input struct {
-		Path    string  `json:"path"`
-		OldText string  `json:"old_text"`
-		NewText *string `json:"new_text"`
-	}
-	if err := decodeArguments(arguments, &input); err != nil {
+	input, err := editFileInputFrom(arguments)
+	if err != nil {
 		return "", err
-	}
-	if strings.TrimSpace(input.Path) == "" {
-		return "", fmt.Errorf("path is required")
-	}
-	if input.OldText == "" {
-		return "", fmt.Errorf("old_text is required")
-	}
-	if input.NewText == nil {
-		return "", fmt.Errorf("new_text is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if _, err := t.edit(input, true); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Edited %s", input.Path), nil
+}
+
+type editFileInput struct {
+	Path    string  `json:"path"`
+	OldText string  `json:"old_text"`
+	NewText *string `json:"new_text"`
+}
+
+func editFileInputFrom(arguments string) (editFileInput, error) {
+	var input editFileInput
+	if err := decodeArguments(arguments, &input); err != nil {
+		return editFileInput{}, err
+	}
+	if strings.TrimSpace(input.Path) == "" {
+		return editFileInput{}, fmt.Errorf("path is required")
+	}
+	if input.OldText == "" {
+		return editFileInput{}, fmt.Errorf("old_text is required")
+	}
+	if input.NewText == nil {
+		return editFileInput{}, fmt.Errorf("new_text is required")
+	}
+	return input, nil
+}
+
+func (t *EditFile) edit(input editFileInput, write bool) (string, error) {
 	resolved, err := t.paths.existing(input.Path)
 	if err != nil {
 		return "", err
@@ -233,10 +318,12 @@ func (t *EditFile) Run(ctx context.Context, arguments string) (string, error) {
 		return "", fmt.Errorf("old_text occurs %d times in %s", count, input.Path)
 	}
 	updated := strings.Replace(string(data), input.OldText, *input.NewText, 1)
-	if err := writeTextFile(resolved, []byte(updated)); err != nil {
-		return "", err
+	if write {
+		if err := writeTextFile(resolved, []byte(updated)); err != nil {
+			return "", err
+		}
 	}
-	return fmt.Sprintf("Edited %s", input.Path), nil
+	return updated, nil
 }
 
 // Glob finds workspace paths without following directory symlinks.
@@ -271,26 +358,21 @@ func (t *Glob) Info() *schema.ToolInfo { return t.info }
 
 func (t *Glob) ConcurrencySafe() bool { return true }
 
+// Validate checks glob arguments without walking the workspace.
+func (t *Glob) Validate(arguments string) error {
+	_, err := globInputFrom(arguments)
+	return err
+}
+
 func (t *Glob) Run(ctx context.Context, arguments string) (string, error) {
-	var input struct {
-		Pattern string `json:"pattern"`
-	}
-	if err := decodeArguments(arguments, &input); err != nil {
+	input, err := globInputFrom(arguments)
+	if err != nil {
 		return "", err
 	}
-	pattern := filepath.ToSlash(strings.TrimSpace(input.Pattern))
-	if pattern == "" {
-		return "", fmt.Errorf("pattern is required")
-	}
-	if !filepath.IsLocal(filepath.FromSlash(pattern)) {
-		return "", fmt.Errorf("pattern must be workspace-relative: %s", input.Pattern)
-	}
-	if err := validateGlobPattern(pattern); err != nil {
-		return "", err
-	}
+	pattern := input.Pattern
 
 	var matches []string
-	err := fs.WalkDir(os.DirFS(t.paths.root), ".", func(entryPath string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(os.DirFS(t.paths.root), ".", func(entryPath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -324,6 +406,28 @@ func (t *Glob) Run(ctx context.Context, arguments string) (string, error) {
 	}
 	sort.Strings(matches)
 	return strings.Join(matches, "\n"), nil
+}
+
+type globInput struct {
+	Pattern string `json:"pattern"`
+}
+
+func globInputFrom(arguments string) (globInput, error) {
+	var input globInput
+	if err := decodeArguments(arguments, &input); err != nil {
+		return globInput{}, err
+	}
+	input.Pattern = filepath.ToSlash(strings.TrimSpace(input.Pattern))
+	if input.Pattern == "" {
+		return globInput{}, fmt.Errorf("pattern is required")
+	}
+	if !filepath.IsLocal(filepath.FromSlash(input.Pattern)) {
+		return globInput{}, fmt.Errorf("pattern must be workspace-relative: %s", input.Pattern)
+	}
+	if err := validateGlobPattern(input.Pattern); err != nil {
+		return globInput{}, err
+	}
+	return input, nil
 }
 
 func writeTextFile(filePath string, content []byte) error {

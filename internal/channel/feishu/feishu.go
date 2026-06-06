@@ -3,8 +3,10 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkchannel "github.com/larksuite/oapi-sdk-go/v3/channel"
@@ -106,6 +108,13 @@ func (c *Channel) Start(ctx context.Context, handler channel.Handler) error {
 			Content:   message.Content,
 		})
 	})
+	c.sdk.OnCardAction(func(ctx context.Context, event *larktypes.CardActionEvent) error {
+		message, ok := approvalActionMessage(event)
+		if !ok {
+			return nil
+		}
+		return handler(ctx, message)
+	})
 	return c.sdk.Start(ctx)
 }
 
@@ -120,6 +129,26 @@ func (c *Channel) Stream(ctx context.Context, message channel.Message, opts chan
 		return nil, fmt.Errorf("start Feishu reply stream: %w", err)
 	}
 	return feishuStream{stream: stream}, nil
+}
+
+// RequestApproval sends an interactive Feishu approval card.
+func (c *Channel) RequestApproval(
+	ctx context.Context,
+	message channel.Message,
+	request channel.ApprovalRequest,
+) error {
+	card, err := approvalCard(request)
+	if err != nil {
+		return fmt.Errorf("build Feishu approval card: %w", err)
+	}
+	if _, err := c.sdk.Send(ctx, &larktypes.SendInput{
+		ChatID:         message.ChatID,
+		ReplyMessageID: message.MessageID,
+		Card:           card,
+	}); err != nil {
+		return fmt.Errorf("send Feishu approval card: %w", err)
+	}
+	return nil
 }
 
 // Close stops the Feishu WebSocket client.
@@ -147,6 +176,110 @@ func (s feishuStream) Close(ctx context.Context) error {
 
 type slogAdapter struct {
 	logger *slog.Logger
+}
+
+func approvalActionMessage(event *larktypes.CardActionEvent) (channel.Message, bool) {
+	if event == nil {
+		return channel.Message{}, false
+	}
+	action, _ := event.Action.Value["goclaw_action"].(string)
+	approvalID, _ := event.Action.Value["approval_id"].(string)
+	if approvalID == "" || (action != "approve" && action != "deny") {
+		return channel.Message{}, false
+	}
+	userID := event.Operator.OpenID
+	if userID == "" {
+		userID = event.Operator.UserID
+	}
+	eventID := event.EventID
+	if eventID == "" {
+		eventID = fmt.Sprintf(
+			"feishu-card-%s-%s-%s",
+			event.MessageID,
+			approvalID,
+			action,
+		)
+	}
+	return channel.Message{
+		EventID:   eventID,
+		MessageID: event.MessageID,
+		ChatID:    event.ChatID,
+		ChatType:  "p2p",
+		UserID:    userID,
+		Content:   "/" + action + " " + approvalID,
+	}, true
+}
+
+func approvalCard(request channel.ApprovalRequest) (string, error) {
+	arguments := strings.ReplaceAll(request.Arguments, "```", "'''")
+	if len(arguments) > 2000 {
+		arguments = arguments[:2000] + "\n... (truncated)"
+	}
+	card := map[string]any{
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"template": "orange",
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": "GoClaw 工具审批",
+			},
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "markdown",
+				"content": fmt.Sprintf(
+					"**原因**：%s\n**工具**：`%s`\n**参数**：\n```json\n%s\n```",
+					request.Reason,
+					request.ToolName,
+					arguments,
+				),
+			},
+			map[string]any{
+				"tag":    "action",
+				"layout": "bisected",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]any{"tag": "plain_text", "content": "允许"},
+						"value": map[string]any{
+							"goclaw_action": "approve",
+							"approval_id":   request.ID,
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "danger",
+						"text": map[string]any{"tag": "plain_text", "content": "拒绝"},
+						"value": map[string]any{
+							"goclaw_action": "deny",
+							"approval_id":   request.ID,
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tag": "note",
+				"elements": []any{
+					map[string]any{
+						"tag": "plain_text",
+						"content": fmt.Sprintf(
+							"后备命令：/approve %s 或 /deny %s",
+							request.ID,
+							request.ID,
+						),
+					},
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(card)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func (a slogAdapter) Debug(ctx context.Context, args ...interface{}) {

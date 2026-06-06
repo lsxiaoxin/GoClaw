@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/lsxiaoxin/GoClaw/internal/permission"
 )
 
 func TestRegistryRejectsDuplicateTools(t *testing.T) {
@@ -158,10 +160,33 @@ func TestRegistryReturnsUnknownToolAndCancellationErrors(t *testing.T) {
 	}
 }
 
+func TestRegistryPermissionUsesToolValidation(t *testing.T) {
+	registry, err := NewRegistry(&fakeTool{
+		name: "write_file",
+		validate: func(string) error {
+			return errors.New("invalid path")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+
+	decision := registry.Permission(Call{Name: "write_file", Arguments: `{}`})
+	if decision.Behavior != permission.Invalid || decision.Reason != "invalid path" {
+		t.Fatalf("decision = %+v", decision)
+	}
+
+	decision = registry.Permission(Call{Name: "missing", Arguments: `{}`})
+	if decision.Behavior != permission.Invalid {
+		t.Fatalf("unknown tool decision = %+v", decision)
+	}
+}
+
 type fakeTool struct {
-	name string
-	safe bool
-	run  func(context.Context, string) (string, error)
+	name     string
+	safe     bool
+	validate func(string) error
+	run      func(context.Context, string) (string, error)
 }
 
 func (t *fakeTool) Info() *schema.ToolInfo {
@@ -170,6 +195,13 @@ func (t *fakeTool) Info() *schema.ToolInfo {
 
 func (t *fakeTool) ConcurrencySafe() bool {
 	return t.safe
+}
+
+func (t *fakeTool) Validate(arguments string) error {
+	if t.validate == nil {
+		return nil
+	}
+	return t.validate(arguments)
 }
 
 func (t *fakeTool) Run(ctx context.Context, arguments string) (string, error) {

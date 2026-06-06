@@ -17,6 +17,12 @@ type Response struct {
 	Closed  bool
 }
 
+// Approval records one native approval prompt.
+type Approval struct {
+	Message channel.Message
+	Request channel.ApprovalRequest
+}
+
 // Channel is an in-memory channel and responder.
 type Channel struct {
 	mu        sync.Mutex
@@ -24,6 +30,26 @@ type Channel struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 	responses []*Response
+	approvals []Approval
+}
+
+// RequestApproval records a native approval prompt.
+func (c *Channel) RequestApproval(
+	_ context.Context,
+	message channel.Message,
+	request channel.ApprovalRequest,
+) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.approvals = append(c.approvals, Approval{Message: message, Request: request})
+	return nil
+}
+
+// Approvals returns a copy of recorded approval prompts.
+func (c *Channel) Approvals() []Approval {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]Approval(nil), c.approvals...)
 }
 
 // New creates a fake channel.

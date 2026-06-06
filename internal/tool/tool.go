@@ -15,6 +15,7 @@ import (
 type Tool interface {
 	Info() *schema.ToolInfo
 	ConcurrencySafe() bool
+	Validate(string) error
 	Run(context.Context, string) (string, error)
 }
 

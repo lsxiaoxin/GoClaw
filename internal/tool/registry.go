@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/lsxiaoxin/GoClaw/internal/permission"
 )
 
 // Call is one model-requested tool invocation.
@@ -22,15 +24,17 @@ type Result struct {
 
 // Registry owns tool definitions and dispatch.
 type Registry struct {
-	tools map[string]Tool
-	infos []*schema.ToolInfo
+	tools  map[string]Tool
+	infos  []*schema.ToolInfo
+	policy *permission.Engine
 }
 
 // NewRegistry creates a registry and rejects invalid or duplicate tools.
 func NewRegistry(tools ...Tool) (*Registry, error) {
 	registry := &Registry{
-		tools: make(map[string]Tool, len(tools)),
-		infos: make([]*schema.ToolInfo, 0, len(tools)),
+		tools:  make(map[string]Tool, len(tools)),
+		infos:  make([]*schema.ToolInfo, 0, len(tools)),
+		policy: permission.New(),
 	}
 	for _, registered := range tools {
 		if registered == nil {
@@ -47,6 +51,18 @@ func NewRegistry(tools ...Tool) (*Registry, error) {
 		registry.infos = append(registry.infos, info)
 	}
 	return registry, nil
+}
+
+// Permission evaluates one call without executing it.
+func (r *Registry) Permission(call Call) permission.Decision {
+	registered, exists := r.tools[call.Name]
+	if !exists {
+		return permission.Decision{
+			Behavior: permission.Invalid,
+			Reason:   fmt.Sprintf("tool %q is not available", call.Name),
+		}
+	}
+	return r.policy.Decide(call.Name, call.Arguments, registered.Validate)
 }
 
 // Infos returns model-facing tool definitions in registration order.

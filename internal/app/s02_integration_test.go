@@ -60,6 +60,32 @@ func TestS02FileToolWorkflow(t *testing.T) {
 		t.Fatalf("Handle() error = %v", err)
 	}
 
+	approvals := waitForApprovals(t, responder, 1)
+	if approvals[0].Request.ToolName != "write_file" {
+		t.Fatalf("first approval = %+v", approvals[0].Request)
+	}
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-s02-approve-write",
+		MessageID: "message-s02-approve-write",
+		ChatID:    "chat-s02",
+		Content:   "/approve " + approvals[0].Request.ID,
+	}); err != nil {
+		t.Fatalf("Handle(approve write) error = %v", err)
+	}
+
+	approvals = waitForApprovals(t, responder, 2)
+	if approvals[1].Request.ToolName != "edit_file" {
+		t.Fatalf("second approval = %+v", approvals[1].Request)
+	}
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-s02-approve-edit",
+		MessageID: "message-s02-approve-edit",
+		ChatID:    "chat-s02",
+		Content:   "/approve " + approvals[1].Request.ID,
+	}); err != nil {
+		t.Fatalf("Handle(approve edit) error = %v", err)
+	}
+
 	responses := waitForClosedResponses(t, responder, 1)
 	if got := responses[0].Chunks; !reflect.DeepEqual(got, []string{"s02 ", "completed"}) {
 		t.Fatalf("stream chunks = %#v", got)
@@ -84,6 +110,20 @@ func TestS02FileToolWorkflow(t *testing.T) {
 	assertToolResult(t, inputs[1][3], "call-edit", "edit_file", "Edited notes/note.txt")
 	assertToolResult(t, inputs[2][5], "call-read", "read_file", "hello s02")
 	assertToolResult(t, inputs[2][6], "call-glob", "glob", "notes/note.txt")
+}
+
+func waitForApprovals(t *testing.T, responder *fake.Channel, count int) []fake.Approval {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		approvals := responder.Approvals()
+		if len(approvals) >= count {
+			return approvals
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d approvals", count)
+	return nil
 }
 
 func newS02Application(

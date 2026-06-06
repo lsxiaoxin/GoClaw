@@ -71,7 +71,7 @@ func run() error {
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s02-tool-use",
+		"stage", "s03-permission",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
