@@ -160,7 +160,7 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		status = "running"
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s01-agent-loop",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s02-tool-use",
 		status,
 		session.Generation,
 		a.workspace,
@@ -209,11 +209,11 @@ func (a *App) reply(ctx context.Context, message channel.Message, text string) e
 	return nil
 }
 
-const helpText = `GoClaw s01 命令：
+const helpText = `GoClaw s02 命令：
 
 /help    查看帮助
 /status  查看当前会话状态
 /new     重置并创建新会话
 /cancel  取消当前运行中的任务
 
-普通消息会交给模型处理；当前仅提供受限 bash 工具。`
+普通消息会交给模型处理；当前提供 bash、read_file、write_file、edit_file 和 glob。`

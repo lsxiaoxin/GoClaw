@@ -8,6 +8,8 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
 func TestRunnerStreamsTextResponse(t *testing.T) {
@@ -17,7 +19,7 @@ func TestRunnerStreamsTextResponse(t *testing.T) {
 			assistantText("world"),
 		}},
 	}
-	runner, err := New(agentModel, 4)
+	runner, err := New(agentModel, 4, mustRegistry(t))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -41,11 +43,11 @@ func TestRunnerStreamsTextResponse(t *testing.T) {
 func TestRunnerExecutesToolAndReturnsResultToModel(t *testing.T) {
 	tool := &stubTool{
 		info: &schema.ToolInfo{Name: "bash"},
-		run: func(_ context.Context, arguments string) string {
+		run: func(_ context.Context, arguments string) (string, error) {
 			if arguments != `{"command":"pwd"}` {
 				t.Fatalf("tool arguments = %q", arguments)
 			}
-			return "/workspace"
+			return "/workspace", nil
 		},
 	}
 	agentModel := &sequentialModel{
@@ -54,7 +56,7 @@ func TestRunnerExecutesToolAndReturnsResultToModel(t *testing.T) {
 			{assistantText("The workspace is /workspace.")},
 		},
 	}
-	runner, err := New(agentModel, 4, tool)
+	runner, err := New(agentModel, 4, mustRegistry(t, tool))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -96,7 +98,7 @@ func TestRunnerStopsAtMaxSteps(t *testing.T) {
 			Role: schema.AgenticRoleTypeAssistant,
 		}},
 	}
-	runner, err := New(agentModel, 3)
+	runner, err := New(agentModel, 3, mustRegistry(t))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -119,7 +121,7 @@ func TestRunnerReturnsUnknownToolResultToModel(t *testing.T) {
 			{assistantText("The tool is unavailable.")},
 		},
 	}
-	runner, err := New(agentModel, 3)
+	runner, err := New(agentModel, 3, mustRegistry(t))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -131,7 +133,7 @@ func TestRunnerReturnsUnknownToolResultToModel(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	got := agentModel.inputs[1][2].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
-	if got != `tool "missing" is not available` {
+	if got != `Error: tool "missing" is not available` {
 		t.Fatalf("unknown tool result = %q", got)
 	}
 }
@@ -176,15 +178,29 @@ func (m *sequentialModel) Stream(
 
 type stubTool struct {
 	info *schema.ToolInfo
-	run  func(context.Context, string) string
+	safe bool
+	run  func(context.Context, string) (string, error)
 }
 
 func (t *stubTool) Info() *schema.ToolInfo {
 	return t.info
 }
 
-func (t *stubTool) Run(ctx context.Context, arguments string) string {
+func (t *stubTool) ConcurrencySafe() bool {
+	return t.safe
+}
+
+func (t *stubTool) Run(ctx context.Context, arguments string) (string, error) {
 	return t.run(ctx, arguments)
+}
+
+func mustRegistry(t *testing.T, tools ...goclawtool.Tool) *goclawtool.Registry {
+	t.Helper()
+	registry, err := goclawtool.NewRegistry(tools...)
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	return registry
 }
 
 func assistantText(text string) *schema.AgenticMessage {

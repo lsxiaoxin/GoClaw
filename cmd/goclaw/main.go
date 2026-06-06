@@ -17,6 +17,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/llm"
 	"github.com/lsxiaoxin/GoClaw/internal/server"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
+	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
 func main() {
@@ -49,15 +50,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	bashTool, err := agent.NewBashTool(
-		cfg.Workspace,
-		cfg.Agent.BashTimeout,
-		cfg.Agent.BashOutputLimit,
-	)
+	tools, err := newToolRegistry(cfg)
 	if err != nil {
 		return err
 	}
-	agentRunner, err := agent.New(agentModel, cfg.Agent.MaxSteps, bashTool)
+	agentRunner, err := agent.New(agentModel, cfg.Agent.MaxSteps, tools)
 	if err != nil {
 		return err
 	}
@@ -74,13 +71,41 @@ func run() error {
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s01-agent-loop",
+		"stage", "s02-tool-use",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),
 		"max_steps", cfg.Agent.MaxSteps,
 	)
 	return server.Run(ctx, transport, application.Handle, logger)
+}
+
+func newToolRegistry(cfg config.Config) (*goclawtool.Registry, error) {
+	bash, err := goclawtool.NewBash(
+		cfg.Workspace,
+		cfg.Agent.BashTimeout,
+		cfg.Agent.BashOutputLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	readFile, err := goclawtool.NewReadFile(cfg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	writeFile, err := goclawtool.NewWriteFile(cfg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	editFile, err := goclawtool.NewEditFile(cfg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	glob, err := goclawtool.NewGlob(cfg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	return goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob)
 }
 
 func newChannel(cfg config.Config, logger *slog.Logger) (channel.Channel, error) {

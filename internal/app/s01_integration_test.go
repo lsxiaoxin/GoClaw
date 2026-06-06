@@ -21,6 +21,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/channel/fake"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
+	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
 func TestS01AgentLoopRunsBashAndStreamsFinalReply(t *testing.T) {
@@ -173,11 +174,15 @@ func newS01Application(
 	agentModel model.AgenticModel,
 ) (*app.App, *fake.Channel, *app.RunRegistry) {
 	t.Helper()
-	bashTool, err := agent.NewBashTool(workspace, 5*time.Second, 64*1024)
+	bashTool, err := goclawtool.NewBash(workspace, 5*time.Second, 64*1024)
 	if err != nil {
-		t.Fatalf("NewBashTool() error = %v", err)
+		t.Fatalf("NewBash() error = %v", err)
 	}
-	runner, err := agent.New(agentModel, 4, bashTool)
+	registry, err := goclawtool.NewRegistry(bashTool)
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	runner, err := agent.New(agentModel, 4, registry)
 	if err != nil {
 		t.Fatalf("agent.New() error = %v", err)
 	}

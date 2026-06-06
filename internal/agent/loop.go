@@ -10,6 +10,8 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
 )
 
 var ErrMaxSteps = errors.New("maximum agent steps exceeded")
@@ -17,51 +19,25 @@ var ErrMaxSteps = errors.New("maximum agent steps exceeded")
 // TextEmitter receives incremental assistant text.
 type TextEmitter = func(context.Context, string) error
 
-// Tool is a function tool available to the model.
-type Tool interface {
-	Info() *schema.ToolInfo
-	Run(context.Context, string) string
-}
-
 // Runner executes the model and tool loop.
 type Runner struct {
 	model    model.AgenticModel
-	tools    map[string]Tool
-	toolInfo []*schema.ToolInfo
+	tools    *goclawtool.Registry
 	maxSteps int
 }
 
 // New creates an agent runner.
-func New(agentModel model.AgenticModel, maxSteps int, tools ...Tool) (*Runner, error) {
+func New(agentModel model.AgenticModel, maxSteps int, tools *goclawtool.Registry) (*Runner, error) {
 	if agentModel == nil {
 		return nil, fmt.Errorf("agent model is required")
 	}
 	if maxSteps <= 0 {
 		return nil, fmt.Errorf("max steps must be positive")
 	}
-
-	runner := &Runner{
-		model:    agentModel,
-		tools:    make(map[string]Tool, len(tools)),
-		toolInfo: make([]*schema.ToolInfo, 0, len(tools)),
-		maxSteps: maxSteps,
+	if tools == nil {
+		return nil, fmt.Errorf("tool registry is required")
 	}
-	for _, tool := range tools {
-		if tool == nil {
-			return nil, fmt.Errorf("tool name is required")
-		}
-		info := tool.Info()
-		if info == nil || info.Name == "" {
-			return nil, fmt.Errorf("tool name is required")
-		}
-		name := info.Name
-		if _, exists := runner.tools[name]; exists {
-			return nil, fmt.Errorf("duplicate tool %q", name)
-		}
-		runner.tools[name] = tool
-		runner.toolInfo = append(runner.toolInfo, info)
-	}
-	return runner, nil
+	return &Runner{model: agentModel, tools: tools, maxSteps: maxSteps}, nil
 }
 
 // Run sends one user prompt through the model and tool loop.
@@ -88,12 +64,20 @@ func (r *Runner) Run(ctx context.Context, prompt string, emit TextEmitter) error
 			}
 			continue
 		}
-		for _, call := range calls {
-			result := r.runTool(ctx, call)
+		toolCalls := make([]goclawtool.Call, len(calls))
+		for index, call := range calls {
+			toolCalls[index] = goclawtool.Call{Name: call.Name, Arguments: call.Arguments}
+		}
+		results := r.tools.Execute(ctx, toolCalls)
+		for index, result := range results {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			messages = append(messages, functionToolResult(call, result))
+			output := result.Output
+			if result.Err != nil {
+				output = "Error: " + result.Err.Error()
+			}
+			messages = append(messages, functionToolResult(calls[index], output))
 		}
 	}
 	return ErrMaxSteps
@@ -104,7 +88,7 @@ func (r *Runner) runModel(
 	messages []*schema.AgenticMessage,
 	emit TextEmitter,
 ) (*schema.AgenticMessage, bool, error) {
-	stream, err := r.model.Stream(ctx, messages, model.WithTools(r.toolInfo))
+	stream, err := r.model.Stream(ctx, messages, model.WithTools(r.tools.Infos()))
 	if err != nil {
 		return nil, false, fmt.Errorf("stream model response: %w", err)
 	}
@@ -143,14 +127,6 @@ func (r *Runner) runModel(
 		return nil, emitted, fmt.Errorf("join model response: %w", err)
 	}
 	return response, emitted, nil
-}
-
-func (r *Runner) runTool(ctx context.Context, call *schema.FunctionToolCall) string {
-	tool, ok := r.tools[call.Name]
-	if !ok {
-		return fmt.Sprintf("tool %q is not available", call.Name)
-	}
-	return tool.Run(ctx, call.Arguments)
 }
 
 func functionToolCalls(message *schema.AgenticMessage) []*schema.FunctionToolCall {
