@@ -4,9 +4,9 @@ GoClaw 是一个使用 Go 和 Eino 构建的学习型编码 Agent。目标是从
 Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、上下文压缩、
 记忆、动态 System Prompt 和错误恢复，并通过飞书等 IM 操作本地工作区。
 
-当前阶段：`s00-bootstrap`
+当前阶段：`s01-agent-loop`
 
-> s00 只建立工程外壳和 IM 通道，尚未执行模型推理。最小 Agent Loop 将在 s01
+> s01 已接入真实模型推理和受限 `bash` 工具。文件读写等结构化工具将在 s02
 > 实现。
 
 ## 学习方式
@@ -23,7 +23,7 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - <https://github.com/shareAI-lab/learn-claude-code>
 - GoClaw 参考其根目录新版教程的前 11 章，但使用 Go、Eino 和 IM 场景重新设计。
 
-## s00 已实现
+## s01 已实现
 
 - 环境变量配置和校验。
 - OpenAI 兼容 Eino `AgenticModel` 工厂。
@@ -33,6 +33,12 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 - 流式回复抽象。
 - `/help`、`/status`、`/new`、`/cancel`。
 - 系统信号驱动的安全退出。
+- 模型调用、工具调用、工具结果回填和继续推理的 Agent Loop。
+- 模型文本通过 `Channel.Stream` 增量返回。
+- 相同 Chat ID 串行运行，不同 Chat ID 可并发。
+- `/cancel` 可取消模型请求和正在执行的 `bash`。
+- `bash` 在工作区执行，并带有超时、输出上限和硬拒绝规则。
+- 最大 step 上限，避免无终止条件的循环。
 
 ## 快速开始
 
@@ -43,6 +49,9 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 运行本地 CLI：
 
 ```bash
+export LLM_API_KEY=your-key
+export LLM_BASE_URL=https://example.com/v1
+export LLM_MODEL=your-model
 go run ./cmd/goclaw
 ```
 
@@ -76,9 +85,12 @@ set +a
 | `GOCLAW_WORKSPACE` | `.` | Agent 允许操作的工作区 |
 | `GOCLAW_DATA_DIR` | `.goclaw` | 运行状态目录 |
 | `GOCLAW_LOG_LEVEL` | `info` | `debug/info/warn/error` |
-| `LLM_API_KEY` | 空 | OpenAI 兼容 API Key，s01 开始使用 |
+| `GOCLAW_MAX_STEPS` | `8` | 单次 Agent 运行的最大模型调用步数 |
+| `GOCLAW_BASH_TIMEOUT` | `10s` | 单次 bash 命令超时 |
+| `GOCLAW_BASH_OUTPUT_LIMIT` | `65536` | bash 合并输出的最大字节数 |
+| `LLM_API_KEY` | 空 | OpenAI 兼容 API Key，启动时必填 |
 | `LLM_BASE_URL` | 空 | OpenAI 兼容 API Base URL |
-| `LLM_MODEL` | 空 | 模型名称 |
+| `LLM_MODEL` | 空 | 模型名称，启动时必填 |
 | `LLM_TIMEOUT` | `120s` | 单次模型请求超时 |
 
 ## 飞书接入
@@ -116,12 +128,13 @@ make vet
 
 ```text
 cmd/goclaw/                 程序入口
-internal/app/               基础命令和运行取消
+internal/agent/             Agent Loop 和受限 bash 工具
+internal/app/               命令路由和运行取消
 internal/channel/           Channel 接口及 CLI/Fake/飞书实现
 internal/config/            环境配置
 internal/llm/               Eino 模型工厂
 internal/server/            Channel 生命周期
 internal/store/             JSON 状态和事件去重
 doc/plan.md                 长期实现计划
-doc/chapters/s00.md         本章代码导读
+doc/chapters/               分阶段代码导读
 ```

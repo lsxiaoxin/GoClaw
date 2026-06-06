@@ -205,7 +205,7 @@ go vet ./...
 ## 7. 当前进度
 
 - [x] s00 工程启动
-- [ ] s01 Agent Loop
+- [x] s01 Agent Loop
 - [ ] s02 Tool Use
 - [ ] s03 Permission
 - [ ] s04 Hooks
