@@ -94,8 +94,10 @@ Loop 开始，逐步实现工具、权限、Hooks、Todo、子 Agent、Skills、
 环境要求：
 
 - Go 1.24 或更高版本。
+- 一个 OpenAI 兼容模型服务。
+- 如需飞书接入，需要飞书开放平台企业自建应用。
 
-运行本地 CLI：
+### 1. 运行本地 CLI
 
 ```bash
 cp .env.example .env
@@ -120,6 +122,46 @@ hello
 读取 README.md 并总结
 创建 notes/example.txt，写入 hello，然后读回来
 查找所有 **/*.go 文件
+```
+
+### 2. 运行飞书机器人
+
+飞书模式使用官方 SDK 的 WebSocket 长连接，不需要公网 HTTP 回调地址。先完成下方
+“飞书接入”配置，然后把 `.env` 改为：
+
+```env
+GOCLAW_CHANNEL=feishu
+GOCLAW_WORKSPACE=/absolute/path/to/your/workspace
+GOCLAW_DATA_DIR=.goclaw
+
+LLM_API_KEY=your-api-key
+LLM_BASE_URL=https://your-openai-compatible-base-url
+LLM_MODEL=your-model
+
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=your-app-secret
+FEISHU_ALLOWED_USER_IDS=ou_xxx
+```
+
+启动：
+
+```bash
+go run ./cmd/goclaw
+```
+
+启动成功时日志会包含：
+
+```text
+starting GoClaw ... stage=s11-error-recovery channel=feishu
+Feishu channel ready
+```
+
+然后在飞书中私聊机器人发送：
+
+```text
+/help
+/status
+读取 README.md 并总结
 ```
 
 写文件、编辑文件或执行非明确只读的 bash 时，GoClaw 会先要求人工审批。
@@ -186,12 +228,138 @@ Hook 配置示例：
 
 ## 飞书接入
 
-1. 在飞书开放平台创建企业自建应用并启用机器人能力。
-2. 将事件订阅方式设置为“使用长连接接收事件”。
-3. 订阅接收消息所需事件，并为应用开通相应消息权限。
-4. 设置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 和
-   `FEISHU_ALLOWED_USER_IDS`。
-5. 设置 `GOCLAW_CHANNEL=feishu` 后启动程序。
+### 1. 创建应用
+
+1. 打开飞书开放平台，创建“企业自建应用”。
+2. 在应用能力中启用“机器人”。
+3. 记录应用的 `App ID` 和 `App Secret`，分别填入：
+
+```env
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+```
+
+### 2. 配置事件订阅
+
+GoClaw 使用飞书官方 SDK 的长连接模式：
+
+1. 进入“事件订阅”。
+2. 接收事件方式选择“使用长连接接收事件”。
+3. 不需要配置公网回调 URL。
+4. 订阅机器人接收消息所需事件。
+5. 如果要使用审批卡片按钮，还需要确保应用能接收卡片交互事件。
+
+当前代码会处理普通消息和审批卡片按钮：
+
+- 普通消息进入 Agent。
+- 审批卡片中的“允许”会转成 `/approve <审批ID>`。
+- 审批卡片中的“拒绝”会转成 `/deny <审批ID>`。
+
+### 3. 开通权限并发布应用
+
+至少需要机器人接收和发送消息相关权限。配置后按飞书开放平台要求发布或安装应用到
+目标组织，否则本地程序即使启动成功，也可能收不到消息或无法回复。
+
+建议先只做单聊验证：
+
+1. 把应用安装到当前企业。
+2. 在飞书中找到机器人并发起私聊。
+3. 发送 `/help`。
+
+### 4. 配置允许的用户
+
+GoClaw 默认只响应白名单用户。把允许使用机器人的飞书用户 ID 填入：
+
+```env
+FEISHU_ALLOWED_USER_IDS=ou_xxx
+```
+
+多个用户用英文逗号分隔：
+
+```env
+FEISHU_ALLOWED_USER_IDS=ou_xxx,ou_yyy
+```
+
+注意这里要填飞书事件里的用户 ID，通常形如 `ou_xxx`。如果填错，日志会出现
+`Feishu message rejected`，机器人不会处理该用户消息。
+
+### 5. 配置群聊，可选
+
+群聊默认关闭。要启用群聊，需要同时配置：
+
+```env
+FEISHU_ENABLE_GROUPS=true
+FEISHU_ALLOWED_GROUP_IDS=oc_xxx
+```
+
+多个群用英文逗号分隔：
+
+```env
+FEISHU_ALLOWED_GROUP_IDS=oc_xxx,oc_yyy
+```
+
+群聊中必须显式 `@bot`，GoClaw 不会响应 `@所有人`。
+
+### 6. 完整 `.env` 示例
+
+单聊模式：
+
+```env
+GOCLAW_CHANNEL=feishu
+GOCLAW_WORKSPACE=/home/me/workspace/my-project
+GOCLAW_DATA_DIR=.goclaw
+GOCLAW_LOG_LEVEL=info
+GOCLAW_MAX_STEPS=8
+GOCLAW_BASH_TIMEOUT=10s
+GOCLAW_BASH_OUTPUT_LIMIT=65536
+
+LLM_API_KEY=sk-xxx
+LLM_BASE_URL=https://api.example.com/v1
+LLM_MODEL=your-model
+LLM_TIMEOUT=120s
+
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_ALLOWED_USER_IDS=ou_xxx
+
+FEISHU_ENABLE_GROUPS=false
+FEISHU_ALLOWED_GROUP_IDS=
+```
+
+群聊模式：
+
+```env
+GOCLAW_CHANNEL=feishu
+GOCLAW_WORKSPACE=/home/me/workspace/my-project
+GOCLAW_DATA_DIR=.goclaw
+
+LLM_API_KEY=sk-xxx
+LLM_BASE_URL=https://api.example.com/v1
+LLM_MODEL=your-model
+
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_ALLOWED_USER_IDS=ou_xxx
+FEISHU_ENABLE_GROUPS=true
+FEISHU_ALLOWED_GROUP_IDS=oc_xxx
+```
+
+### 7. 启动和验证
+
+启动：
+
+```bash
+go run ./cmd/goclaw
+```
+
+验证顺序：
+
+1. 看到 `Feishu channel ready`。
+2. 私聊机器人发送 `/help`，应该收到命令说明。
+3. 发送 `/status`，应该看到当前阶段、Todo 和最近错误摘要。
+4. 发送 `读取 README.md 并总结`，应该收到模型回复。
+5. 发送写文件类任务，应该收到工具审批卡片。
+6. 点击“允许”或发送 `/approve <审批ID>`，Agent 应继续执行。
 
 默认安全策略：
 
@@ -200,6 +368,37 @@ Hook 配置示例：
 - 只有设置 `FEISHU_ENABLE_GROUPS=true` 且配置
   `FEISHU_ALLOWED_GROUP_IDS` 后才启用群聊。
 - 群聊必须显式 `@bot`，不会响应 `@所有人`。
+
+### 8. 常见问题
+
+程序启动时报 `FEISHU_APP_ID is required when GOCLAW_CHANNEL=feishu`：
+
+- `.env` 中缺少 `FEISHU_APP_ID`。
+- 或当前 shell 中环境变量覆盖了 `.env`。
+
+程序启动成功但机器人不回复：
+
+- 确认飞书事件订阅选择了长连接模式。
+- 确认应用已发布或安装到当前企业。
+- 确认机器人能力已启用。
+- 确认 `FEISHU_ALLOWED_USER_IDS` 是正确的 `ou_xxx`。
+- 看日志是否有 `Feishu message rejected`。
+
+群里不回复：
+
+- 确认 `FEISHU_ENABLE_GROUPS=true`。
+- 确认 `FEISHU_ALLOWED_GROUP_IDS` 填的是正确的 `oc_xxx`。
+- 群聊必须显式 `@bot`。
+
+审批卡片按钮没有反应：
+
+- 确认应用已开启卡片交互事件。
+- 可以用文本命令兜底：`/approve <审批ID>` 或 `/deny <审批ID>`。
+
+模型不回复或报错：
+
+- 先用 CLI 模式验证 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL`。
+- 再切换 `GOCLAW_CHANNEL=feishu`。
 
 飞书接入基于官方 SDK 的高层 Channel 模块：
 
