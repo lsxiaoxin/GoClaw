@@ -19,6 +19,7 @@ import (
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/llm"
 	"github.com/lsxiaoxin/GoClaw/internal/server"
+	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
@@ -58,11 +59,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	tools, err := newToolRegistry(cfg, todoStore, agentModel)
+	skills, err := loadSkills(cfg)
 	if err != nil {
 		return err
 	}
-	agentRunner, err := agent.New(agentModel, cfg.Agent.MaxSteps, tools)
+	tools, err := newToolRegistry(cfg, todoStore, agentModel, skills)
+	if err != nil {
+		return err
+	}
+	agentRunner, err := agent.New(
+		agentModel,
+		cfg.Agent.MaxSteps,
+		tools,
+		agent.WithSkills(skill.NewSelector(skills)),
+	)
 	if err != nil {
 		return err
 	}
@@ -93,6 +103,7 @@ func newToolRegistry(
 	cfg config.Config,
 	todoStore *todo.Store,
 	agentModel model.AgenticModel,
+	skills []skill.Skill,
 ) (*goclawtool.Registry, error) {
 	bash, err := goclawtool.NewBash(
 		cfg.Workspace,
@@ -135,12 +146,24 @@ func newToolRegistry(
 	if err != nil {
 		return nil, err
 	}
-	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob, todoWrite, task)
+	loadSkill, err := goclawtool.NewLoadSkill(skills)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := goclawtool.NewRegistry(bash, readFile, writeFile, editFile, glob, todoWrite, task, loadSkill)
 	if err != nil {
 		return nil, err
 	}
 	registry.SetHooks(hooks.NewBus(cfg.Hooks, nil))
 	return registry, nil
+}
+
+func loadSkills(cfg config.Config) ([]skill.Skill, error) {
+	loader, err := skill.NewLoader(cfg.DataDir + "/skills")
+	if err != nil {
+		return nil, err
+	}
+	return loader.Load()
 }
 
 func newChannel(cfg config.Config, logger *slog.Logger) (channel.Channel, error) {

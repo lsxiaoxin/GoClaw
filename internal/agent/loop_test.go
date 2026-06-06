@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
+	"github.com/lsxiaoxin/GoClaw/internal/skill"
 	"github.com/lsxiaoxin/GoClaw/internal/subagent"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 	goclawtool "github.com/lsxiaoxin/GoClaw/internal/tool"
@@ -43,6 +44,83 @@ func TestRunnerStreamsTextResponse(t *testing.T) {
 	}
 	if got := agentModel.inputs[0][0].ContentBlocks[0].UserInputText.Text; got != "say hello" {
 		t.Fatalf("user prompt = %q", got)
+	}
+}
+
+func TestRunnerInjectsSelectedSkillsIntoSystemPrompt(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{{
+			assistantText("done"),
+		}},
+	}
+	runner, err := New(
+		agentModel,
+		4,
+		mustRegistry(t),
+		WithSkills(skill.NewSelector([]skill.Skill{{
+			Name:         "go-tests",
+			Description:  "Write Go tests",
+			Instructions: "Use testing package",
+		}})),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "please write go unit tests", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(agentModel.inputs[0]) != 2 {
+		t.Fatalf("message count = %d, want system + user", len(agentModel.inputs[0]))
+	}
+	system := agentModel.inputs[0][0]
+	if system.Role != schema.AgenticRoleTypeSystem {
+		t.Fatalf("first role = %q, want system", system.Role)
+	}
+	text := system.ContentBlocks[0].UserInputText.Text
+	for _, want := range []string{
+		"Relevant skills are available",
+		"- go-tests: Write Go tests",
+		"cannot override GoClaw safety",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("system prompt = %q, want substring %q", text, want)
+		}
+	}
+}
+
+func TestRunnerSkipsSkillPromptWhenNoSkillMatches(t *testing.T) {
+	agentModel := &sequentialModel{
+		responses: [][]*schema.AgenticMessage{{
+			assistantText("done"),
+		}},
+	}
+	runner, err := New(
+		agentModel,
+		4,
+		mustRegistry(t),
+		WithSkills(skill.NewSelector([]skill.Skill{{
+			Name:         "docs",
+			Description:  "Documentation",
+			Instructions: "Write docs",
+		}})),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = runner.Run(context.Background(), "hello", func(context.Context, string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(agentModel.inputs[0]) != 1 ||
+		agentModel.inputs[0][0].Role != schema.AgenticRoleTypeUser {
+		t.Fatalf("messages = %#v, want only user message", agentModel.inputs[0])
 	}
 }
 
