@@ -2,6 +2,7 @@
 package subagent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -22,6 +23,9 @@ type Request struct {
 	Description string `json:"description,omitempty"`
 }
 
+// SubagentRequest keeps the explicit stage vocabulary for callers and docs.
+type SubagentRequest = Request
+
 // Validate checks that a subagent request is executable.
 func (r Request) Validate() error {
 	if strings.TrimSpace(r.Prompt) == "" {
@@ -35,6 +39,14 @@ type Result struct {
 	Status  Status `json:"status"`
 	Summary string `json:"summary"`
 	Error   string `json:"error,omitempty"`
+}
+
+// SubagentResult keeps the explicit stage vocabulary for callers and docs.
+type SubagentResult = Result
+
+// Executor runs one isolated child-agent task.
+type Executor interface {
+	Execute(context.Context, Request) (Result, error)
 }
 
 // Text formats a result as a concise tool result for the parent agent.
