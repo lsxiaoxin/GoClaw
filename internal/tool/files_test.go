@@ -96,6 +96,29 @@ func TestEditFileRequiresOneExactMatch(t *testing.T) {
 	}
 }
 
+func TestReadFileLimitDoesNotCountTrailingNewline(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(workspace, "example.txt"),
+		[]byte("one\ntwo\nthree\n"),
+		0o600,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	read := mustReadFile(t, workspace)
+
+	output, err := read.Run(
+		context.Background(),
+		`{"path":"example.txt","limit":3}`,
+	)
+	if err != nil {
+		t.Fatalf("read_file error = %v", err)
+	}
+	if output != "one\ntwo\nthree\n" {
+		t.Fatalf("read_file output = %q", output)
+	}
+}
+
 func TestFileToolsRejectPathEscape(t *testing.T) {
 	workspace := t.TempDir()
 	outside := t.TempDir()

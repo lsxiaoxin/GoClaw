@@ -79,6 +79,9 @@ func (t *ReadFile) Run(ctx context.Context, arguments string) (string, error) {
 	}
 
 	lines := strings.Split(string(data), "\n")
+	if len(data) > 0 && data[len(data)-1] == '\n' {
+		lines = lines[:len(lines)-1]
+	}
 	if len(lines) <= *input.Limit {
 		return string(data), nil
 	}
