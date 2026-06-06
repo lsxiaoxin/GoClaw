@@ -499,7 +499,16 @@ func contextMessage(message *schema.AgenticMessage) (contextmgr.Role, string) {
 			parts = append(parts, toolResultContent(block.FunctionToolResult))
 		}
 	}
-	return role, strings.Join(parts, "\n")
+	content := strings.Join(parts, "\n")
+	if role == contextmgr.RoleSystem &&
+		strings.HasPrefix(content, "Prior conversation summary:\n") {
+		return contextmgr.RoleSummary, strings.TrimPrefix(content, "Prior conversation summary:\n")
+	}
+	if role == contextmgr.RoleUser &&
+		strings.HasPrefix(content, "Previous tool result: ") {
+		return contextmgr.RoleTool, strings.TrimPrefix(content, "Previous tool result: ")
+	}
+	return role, content
 }
 
 func toolResultContent(result *schema.FunctionToolResult) string {

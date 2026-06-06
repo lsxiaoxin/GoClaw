@@ -16,6 +16,7 @@ import (
 	channelcli "github.com/lsxiaoxin/GoClaw/internal/channel/cli"
 	channelfeishu "github.com/lsxiaoxin/GoClaw/internal/channel/feishu"
 	"github.com/lsxiaoxin/GoClaw/internal/config"
+	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/hooks"
 	"github.com/lsxiaoxin/GoClaw/internal/llm"
 	"github.com/lsxiaoxin/GoClaw/internal/server"
@@ -48,6 +49,14 @@ func run() error {
 		return err
 	}
 	todoStore, err := todo.NewStore(cfg.DataDir + "/todos")
+	if err != nil {
+		return err
+	}
+	contextStore, err := contextmgr.NewStore(cfg.DataDir + "/context")
+	if err != nil {
+		return err
+	}
+	contextManager, err := contextmgr.New(contextmgr.DefaultPolicy(), contextmgr.RuleSummarizer{})
 	if err != nil {
 		return err
 	}
@@ -87,10 +96,11 @@ func run() error {
 		logger,
 	)
 	application.SetTodoStore(todoStore)
+	application.SetContextManager(contextStore, contextManager)
 
 	logger.Info(
 		"starting GoClaw",
-		"stage", "s07-skill-loading",
+		"stage", "s08-context-compact",
 		"channel", transport.Name(),
 		"workspace", cfg.Workspace,
 		"data_dir", state.Root(),

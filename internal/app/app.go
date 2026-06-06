@@ -14,6 +14,7 @@ import (
 
 	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
+	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 )
@@ -33,6 +34,22 @@ type TodoSummaryStore interface {
 	Summary(string) (todo.Summary, error)
 }
 
+// ContextHistoryStore persists compacted conversation history.
+type ContextHistoryStore interface {
+	Load(string) (contextmgr.ConversationHistory, error)
+	Save(contextmgr.ConversationHistory) error
+}
+
+// ContextManager compacts conversation history according to s08 policy.
+type ContextManager interface {
+	Apply(
+		context.Context,
+		contextmgr.ConversationHistory,
+		[]contextmgr.Message,
+		string,
+	) (contextmgr.ConversationHistory, bool, error)
+}
+
 // AgentRunner executes and resumes Agent requests.
 type AgentRunner interface {
 	Start(context.Context, string, agent.TextEmitter) (agent.RunResult, error)
@@ -44,16 +61,27 @@ type AgentRunner interface {
 	) (agent.RunResult, error)
 }
 
+type contextAgentRunner interface {
+	StartWithHistory(
+		context.Context,
+		[]contextmgr.Message,
+		string,
+		agent.TextEmitter,
+	) (agent.RunResult, error)
+}
+
 // App handles normalized inbound messages.
 type App struct {
-	runContext context.Context
-	store      SessionStore
-	responder  channel.Responder
-	runs       *RunRegistry
-	agent      AgentRunner
-	workspace  string
-	todos      TodoSummaryStore
-	logger     *slog.Logger
+	runContext     context.Context
+	store          SessionStore
+	responder      channel.Responder
+	runs           *RunRegistry
+	agent          AgentRunner
+	workspace      string
+	todos          TodoSummaryStore
+	contextStore   ContextHistoryStore
+	contextManager ContextManager
+	logger         *slog.Logger
 }
 
 // New creates the GoClaw application.
@@ -80,6 +108,12 @@ func New(
 // SetTodoStore enables todo summary reporting in /status.
 func (a *App) SetTodoStore(todoStore TodoSummaryStore) {
 	a.todos = todoStore
+}
+
+// SetContextManager enables per-chat context history persistence and compaction.
+func (a *App) SetContextManager(store ContextHistoryStore, manager ContextManager) {
+	a.contextStore = store
+	a.contextManager = manager
 }
 
 // Handle processes one inbound message.
@@ -134,8 +168,13 @@ func (a *App) handlePrompt(ctx context.Context, message channel.Message, prompt 
 		return a.reply(ctx, message, "当前已有运行中的任务。可使用 /cancel 取消。")
 	}
 	runCtx = todo.WithChatID(runCtx, message.ChatID)
+	history, err := a.loadContextHistory(message.ChatID)
+	if err != nil {
+		finish()
+		return fmt.Errorf("load context history: %w", err)
+	}
 	go a.runAgent(runCtx, finish, message, func(emit agent.TextEmitter) (agent.RunResult, error) {
-		return a.agent.Start(runCtx, prompt, emit)
+		return a.startAgent(runCtx, history.Messages, prompt, emit)
 	})
 	return nil
 }
@@ -196,6 +235,9 @@ func (a *App) runAgent(
 		message:   message,
 	}
 	result, err := run(writer.Append)
+	if persistErr := a.persistContextHistory(ctx, message.ChatID, result); persistErr != nil {
+		a.logger.WarnContext(ctx, "persist context history", "chat_id", message.ChatID, "error", persistErr)
+	}
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -301,7 +343,7 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		}
 	}
 	return a.reply(ctx, message, fmt.Sprintf(
-		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s07-skill-loading\nTodo：total=%d pending=%d in_progress=%d completed=%d",
+		"状态：%s\n会话代次：%d\n工作区：%s\n阶段：s08-context-compact\nTodo：total=%d pending=%d in_progress=%d completed=%d",
 		status,
 		session.Generation,
 		a.workspace,
@@ -310,6 +352,72 @@ func (a *App) handleStatus(ctx context.Context, message channel.Message) error {
 		todoSummary.InProgress,
 		todoSummary.Completed,
 	))
+}
+
+func (a *App) loadContextHistory(chatID string) (contextmgr.ConversationHistory, error) {
+	if a.contextStore == nil {
+		return contextmgr.ConversationHistory{SessionID: chatID}, nil
+	}
+	return a.contextStore.Load(chatID)
+}
+
+func (a *App) startAgent(
+	ctx context.Context,
+	history []contextmgr.Message,
+	prompt string,
+	emit agent.TextEmitter,
+) (agent.RunResult, error) {
+	if runner, ok := a.agent.(contextAgentRunner); ok {
+		return runner.StartWithHistory(ctx, history, prompt, emit)
+	}
+	return a.agent.Start(ctx, prompt, emit)
+}
+
+func (a *App) persistContextHistory(ctx context.Context, chatID string, result agent.RunResult) error {
+	if a.contextStore == nil || result.Checkpoint == nil {
+		return nil
+	}
+	messages := agent.HistoryMessages(result.Checkpoint.Messages)
+	if len(messages) == 0 {
+		return nil
+	}
+	history := contextmgr.ConversationHistory{SessionID: chatID}
+	todoSummary, err := a.contextTodoSummary(chatID)
+	if err != nil {
+		return err
+	}
+	if a.contextManager == nil {
+		history.Messages = messages
+		history.UpdatedAt = time.Now().UTC()
+		return a.contextStore.Save(history)
+	}
+	compacted, _, err := a.contextManager.Apply(ctx, history, messages, todoSummary)
+	if err != nil {
+		history.Messages = messages
+		history.UpdatedAt = time.Now().UTC()
+		if saveErr := a.contextStore.Save(history); saveErr != nil {
+			return fmt.Errorf("%w; save uncompacted context: %v", err, saveErr)
+		}
+		return err
+	}
+	return a.contextStore.Save(compacted)
+}
+
+func (a *App) contextTodoSummary(chatID string) (string, error) {
+	if a.todos == nil {
+		return "", nil
+	}
+	summary, err := a.todos.Summary(chatID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"total=%d pending=%d in_progress=%d completed=%d",
+		summary.Total,
+		summary.Pending,
+		summary.InProgress,
+		summary.Completed,
+	), nil
 }
 
 func agentErrorText(err error) string {

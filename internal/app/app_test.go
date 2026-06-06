@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
+
 	"github.com/lsxiaoxin/GoClaw/internal/agent"
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
 	"github.com/lsxiaoxin/GoClaw/internal/channel/fake"
+	"github.com/lsxiaoxin/GoClaw/internal/contextmgr"
 	"github.com/lsxiaoxin/GoClaw/internal/store"
 	"github.com/lsxiaoxin/GoClaw/internal/todo"
 )
@@ -221,12 +224,214 @@ func TestAppStatusShowsTodoSummary(t *testing.T) {
 	responses := waitForResponses(t, responder, 1)
 	got := strings.Join(responses[0].Chunks, "")
 	for _, want := range []string{
-		"阶段：s07-skill-loading",
+		"阶段：s08-context-compact",
 		"Todo：total=3 pending=1 in_progress=1 completed=1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status response = %q, want substring %q", got, want)
 		}
+	}
+}
+
+func TestAppLoadsAndPersistsContextHistory(t *testing.T) {
+	state, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	contextStore, err := contextmgr.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("contextmgr.NewStore() error = %v", err)
+	}
+	initial := contextmgr.ConversationHistory{
+		SessionID: "chat-1",
+		Messages: []contextmgr.Message{
+			{Role: contextmgr.RoleSummary, Content: "previous summary"},
+			{Role: contextmgr.RoleUser, Content: "prior request"},
+		},
+	}
+	if err := contextStore.Save(initial); err != nil {
+		t.Fatalf("Save(initial) error = %v", err)
+	}
+
+	responder := fake.New()
+	agentRunner := &historyAgent{
+		run: func(
+			_ context.Context,
+			history []contextmgr.Message,
+			prompt string,
+			emit agent.TextEmitter,
+		) (agent.RunResult, error) {
+			if prompt != "continue" {
+				t.Fatalf("prompt = %q", prompt)
+			}
+			if len(history) != 2 || history[0].Role != contextmgr.RoleSummary ||
+				history[0].Content != "previous summary" {
+				t.Fatalf("history = %#v", history)
+			}
+			if err := emit(context.Background(), "done"); err != nil {
+				return agent.RunResult{}, err
+			}
+			return agent.RunResult{
+				Status: agent.StatusCompleted,
+				Checkpoint: &agent.Checkpoint{Messages: contextmgrMessages{
+					{role: "user", content: "continue"},
+					{role: "assistant", content: "done"},
+				}.agentic()},
+			}, nil
+		},
+	}
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		agentRunner,
+		"/workspace",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	application.SetContextManager(contextStore, nil)
+
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-context",
+		MessageID: "message-context",
+		ChatID:    "chat-1",
+		Content:   "continue",
+	}); err != nil {
+		t.Fatalf("Handle(prompt) error = %v", err)
+	}
+
+	responses := waitForResponses(t, responder, 1)
+	if got := strings.Join(responses[0].Chunks, ""); got != "done" {
+		t.Fatalf("response = %q", got)
+	}
+	saved, err := contextStore.Load("chat-1")
+	if err != nil {
+		t.Fatalf("Load(saved) error = %v", err)
+	}
+	if len(saved.Messages) != 2 ||
+		saved.Messages[0].Content != "continue" ||
+		saved.Messages[1].Content != "done" {
+		t.Fatalf("saved history = %#v", saved.Messages)
+	}
+}
+
+func TestAppCompactsContextHistoryAndKeepsRecentMessages(t *testing.T) {
+	state, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	contextStore, err := contextmgr.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("contextmgr.NewStore() error = %v", err)
+	}
+	manager, err := contextmgr.New(contextmgr.CompactPolicy{
+		MaxMessages:    4,
+		MaxCharacters:  1000,
+		RetainMessages: 2,
+	}, contextmgr.RuleSummarizer{})
+	if err != nil {
+		t.Fatalf("contextmgr.New() error = %v", err)
+	}
+
+	responder := fake.New()
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		&historyAgent{
+			run: func(
+				context.Context,
+				[]contextmgr.Message,
+				string,
+				agent.TextEmitter,
+			) (agent.RunResult, error) {
+				return agent.RunResult{
+					Status: agent.StatusCompleted,
+					Checkpoint: &agent.Checkpoint{Messages: contextmgrMessages{
+						{role: "user", content: "first"},
+						{role: "assistant", content: "second"},
+						{role: "tool", content: "read_file: README important"},
+						{role: "assistant", content: "after tool"},
+						{role: "assistant", content: "final"},
+					}.agentic()},
+				}, nil
+			},
+		},
+		"/workspace",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	application.SetContextManager(contextStore, manager)
+
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-compact",
+		MessageID: "message-compact",
+		ChatID:    "chat-compact",
+		Content:   "compact",
+	}); err != nil {
+		t.Fatalf("Handle(prompt) error = %v", err)
+	}
+	saved := waitForContextMessages(t, contextStore, "chat-compact", 3)
+	if len(saved.Messages) != 3 || saved.Messages[0].Role != contextmgr.RoleSummary {
+		t.Fatalf("saved history = %#v, want summary + recent", saved.Messages)
+	}
+	if !strings.Contains(saved.Messages[0].Content, "read_file: README important") {
+		t.Fatalf("summary = %q, want tool result details", saved.Messages[0].Content)
+	}
+	if saved.Messages[1].Content != "after tool" ||
+		saved.Messages[2].Content != "final" {
+		t.Fatalf("recent messages = %#v", saved.Messages[1:])
+	}
+}
+
+func TestAppContextSummarizerFailureDoesNotBreakRun(t *testing.T) {
+	state, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	contextStore, err := contextmgr.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("contextmgr.NewStore() error = %v", err)
+	}
+	manager := failingContextManager{}
+	responder := fake.New()
+	application := New(
+		context.Background(),
+		state,
+		responder,
+		NewRunRegistry(),
+		&historyAgent{
+			run: func(
+				context.Context,
+				[]contextmgr.Message,
+				string,
+				agent.TextEmitter,
+			) (agent.RunResult, error) {
+				return agent.RunResult{
+					Status: agent.StatusCompleted,
+					Checkpoint: &agent.Checkpoint{Messages: contextmgrMessages{
+						{role: "user", content: "keep"},
+						{role: "assistant", content: "going"},
+					}.agentic()},
+				}, nil
+			},
+		},
+		"/workspace",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	application.SetContextManager(contextStore, manager)
+
+	if err := application.Handle(context.Background(), channel.Message{
+		EventID:   "event-context-failure",
+		MessageID: "message-context-failure",
+		ChatID:    "chat-context-failure",
+		Content:   "hello",
+	}); err != nil {
+		t.Fatalf("Handle(prompt) error = %v", err)
+	}
+	saved := waitForContextMessages(t, contextStore, "chat-context-failure", 2)
+	if len(saved.Messages) != 2 {
+		t.Fatalf("saved history = %#v, want uncompacted messages", saved.Messages)
 	}
 }
 
@@ -255,6 +460,85 @@ func (a *stubAgent) Resume(
 	return agent.RunResult{Status: agent.StatusFailed}, errors.New("unexpected Resume call")
 }
 
+type historyAgent struct {
+	run func(context.Context, []contextmgr.Message, string, agent.TextEmitter) (agent.RunResult, error)
+}
+
+func (a *historyAgent) Start(
+	ctx context.Context,
+	prompt string,
+	emit agent.TextEmitter,
+) (agent.RunResult, error) {
+	return a.StartWithHistory(ctx, nil, prompt, emit)
+}
+
+func (a *historyAgent) StartWithHistory(
+	ctx context.Context,
+	history []contextmgr.Message,
+	prompt string,
+	emit agent.TextEmitter,
+) (agent.RunResult, error) {
+	return a.run(ctx, history, prompt, emit)
+}
+
+func (a *historyAgent) Resume(
+	context.Context,
+	*agent.Checkpoint,
+	agent.ApprovalDecision,
+	agent.TextEmitter,
+) (agent.RunResult, error) {
+	return agent.RunResult{Status: agent.StatusFailed}, errors.New("unexpected Resume call")
+}
+
+type contextmgrMessage struct {
+	role    string
+	content string
+}
+
+type contextmgrMessages []contextmgrMessage
+
+func (messages contextmgrMessages) agentic() []*schema.AgenticMessage {
+	agentic := make([]*schema.AgenticMessage, 0, len(messages))
+	for _, message := range messages {
+		switch message.role {
+		case "user":
+			agentic = append(agentic, schema.UserAgenticMessage(message.content))
+		case "assistant":
+			agentic = append(agentic, &schema.AgenticMessage{
+				Role: schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.AssistantGenText{Text: message.content}),
+				},
+			})
+		case "tool":
+			agentic = append(agentic, &schema.AgenticMessage{
+				Role: schema.AgenticRoleTypeUser,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.FunctionToolResult{
+						Name: "read_file",
+						Content: []*schema.FunctionToolResultContentBlock{{
+							Type: schema.FunctionToolResultContentBlockTypeText,
+							Text: &schema.UserInputText{Text: strings.TrimPrefix(message.content, "read_file: ")},
+						}},
+					}),
+				},
+			})
+		}
+	}
+	return agentic
+}
+
+type failingContextManager struct{}
+
+func (failingContextManager) Apply(
+	context.Context,
+	contextmgr.ConversationHistory,
+	[]contextmgr.Message,
+	string,
+) (contextmgr.ConversationHistory, bool, error) {
+	return contextmgr.ConversationHistory{}, false, errors.New("summarizer failed")
+}
+
 func waitForResponses(t *testing.T, responder *fake.Channel, count int) []fake.Response {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -273,6 +557,28 @@ func waitForResponses(t *testing.T, responder *fake.Channel, count int) []fake.R
 	}
 	t.Fatalf("timed out waiting for %d closed responses", count)
 	return nil
+}
+
+func waitForContextMessages(
+	t *testing.T,
+	store *contextmgr.Store,
+	sessionID string,
+	count int,
+) contextmgr.ConversationHistory {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		history, err := store.Load(sessionID)
+		if err != nil {
+			t.Fatalf("Load(%s) error = %v", sessionID, err)
+		}
+		if len(history.Messages) >= count {
+			return history
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d context messages", count)
+	return contextmgr.ConversationHistory{}
 }
 
 func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
