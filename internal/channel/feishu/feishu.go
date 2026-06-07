@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkchannel "github.com/larksuite/oapi-sdk-go/v3/channel"
 	larktypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
 	"github.com/lsxiaoxin/GoClaw/internal/channel"
@@ -20,8 +22,9 @@ import (
 
 // Channel receives Feishu events over a WebSocket connection.
 type Channel struct {
-	sdk    larktypes.Channel
-	logger *slog.Logger
+	sdk      larktypes.Channel
+	wsClient *larkws.Client
+	logger   *slog.Logger
 }
 
 // New creates a Feishu channel without opening the network connection.
@@ -33,9 +36,11 @@ func New(cfg config.FeishuConfig, logger *slog.Logger) *Channel {
 		lark.WithLogLevel(larkcore.LogLevelInfo),
 		lark.WithLogger(sdkLogger),
 	)
+	eventDispatcher := dispatcher.NewEventDispatcher("", "")
 	wsClient := larkws.NewClient(
 		cfg.AppID,
 		cfg.AppSecret,
+		larkws.WithEventHandler(eventDispatcher),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 		larkws.WithLogger(sdkLogger),
 	)
@@ -58,8 +63,9 @@ func New(cfg config.FeishuConfig, logger *slog.Logger) *Channel {
 	sdk.UpdatePolicy(policy)
 
 	return &Channel{
-		sdk:    sdk,
-		logger: logger,
+		sdk:      sdk,
+		wsClient: wsClient,
+		logger:   logger,
 	}
 }
 
@@ -120,15 +126,11 @@ func (c *Channel) Start(ctx context.Context, handler channel.Handler) error {
 
 // Stream creates a Feishu markdown reply stream.
 func (c *Channel) Stream(ctx context.Context, message channel.Message, opts channel.StreamOptions) (channel.Stream, error) {
-	stream, err := c.sdk.Stream(ctx, &larktypes.SendInput{
+	return newFeishuStream(c.sdk, &larktypes.SendInput{
 		ChatID:         message.ChatID,
 		ReplyMessageID: message.MessageID,
 		Title:          opts.Title,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("start Feishu reply stream: %w", err)
-	}
-	return feishuStream{stream: stream}, nil
+	}), nil
 }
 
 // RequestApproval sends an interactive Feishu approval card.
@@ -157,19 +159,48 @@ func (c *Channel) Close(ctx context.Context) error {
 }
 
 type feishuStream struct {
-	stream larktypes.StreamController
+	sdk   larktypes.Channel
+	input larktypes.SendInput
+
+	mu      sync.Mutex
+	content string
+	closed  bool
 }
 
-func (s feishuStream) Append(ctx context.Context, text string) error {
-	if err := s.stream.Append(ctx, text); err != nil {
-		return fmt.Errorf("append Feishu reply: %w", err)
+func newFeishuStream(sdk larktypes.Channel, input *larktypes.SendInput) *feishuStream {
+	stream := &feishuStream{sdk: sdk}
+	if input != nil {
+		stream.input = *input
 	}
+	return stream
+}
+
+func (s *feishuStream) Append(ctx context.Context, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("append Feishu reply: stream is closed")
+	}
+	s.content += text
 	return nil
 }
 
-func (s feishuStream) Close(ctx context.Context) error {
-	if err := s.stream.Close(ctx); err != nil {
-		return fmt.Errorf("close Feishu reply: %w", err)
+func (s *feishuStream) Close(ctx context.Context) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	input := s.input
+	input.Markdown = s.content
+	s.mu.Unlock()
+
+	if strings.TrimSpace(input.Markdown) == "" {
+		return nil
+	}
+	if _, err := s.sdk.Send(ctx, &input); err != nil {
+		return fmt.Errorf("send Feishu reply: %w", err)
 	}
 	return nil
 }

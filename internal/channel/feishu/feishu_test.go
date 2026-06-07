@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -31,6 +32,9 @@ func TestNewConfiguresClosedGroupsByDefault(t *testing.T) {
 	if len(policy.GroupAllowlist) != 1 || policy.GroupAllowlist[0] != "__goclaw_groups_disabled__" {
 		t.Fatalf("GroupAllowlist = %#v", policy.GroupAllowlist)
 	}
+	if transport.wsClient.EventHandler() == nil {
+		t.Fatal("WebSocket event dispatcher is nil")
+	}
 }
 
 func TestNewConfiguresExplicitGroupAllowlist(t *testing.T) {
@@ -48,6 +52,68 @@ func TestNewConfiguresExplicitGroupAllowlist(t *testing.T) {
 	}
 	if policy.RequireMention == nil || !*policy.RequireMention {
 		t.Fatal("RequireMention must be enabled")
+	}
+}
+
+func TestStreamBuffersChunksUntilClose(t *testing.T) {
+	sdk := &recordingSDK{}
+	transport := &Channel{
+		sdk:    sdk,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	stream, err := transport.Stream(context.Background(), channel.Message{
+		MessageID: "message-1",
+		ChatID:    "chat-1",
+	}, channel.StreamOptions{Title: "GoClaw"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if err := stream.Append(context.Background(), "hello "); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if err := stream.Append(context.Background(), "world"); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if sdk.sendCount != 0 {
+		t.Fatalf("Send() called before Close(): %d", sdk.sendCount)
+	}
+
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if sdk.sendCount != 1 {
+		t.Fatalf("Send() count = %d, want 1", sdk.sendCount)
+	}
+	if sdk.sent.ChatID != "chat-1" || sdk.sent.ReplyMessageID != "message-1" ||
+		sdk.sent.Title != "GoClaw" || sdk.sent.Markdown != "hello world" {
+		t.Fatalf("send input = %+v", sdk.sent)
+	}
+}
+
+func TestStreamCloseSkipsEmptyMessage(t *testing.T) {
+	sdk := &recordingSDK{}
+	stream := newFeishuStream(sdk, &larktypes.SendInput{ChatID: "chat-1"})
+
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if sdk.sendCount != 0 {
+		t.Fatalf("Send() count = %d, want 0", sdk.sendCount)
+	}
+}
+
+func TestStreamCloseReturnsSendError(t *testing.T) {
+	sendErr := errors.New("send failed")
+	sdk := &recordingSDK{sendErr: sendErr}
+	stream := newFeishuStream(sdk, &larktypes.SendInput{ChatID: "chat-1"})
+	if err := stream.Append(context.Background(), "hello"); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	err := stream.Close(context.Background())
+	if !errors.Is(err, sendErr) {
+		t.Fatalf("Close() error = %v, want %v", err, sendErr)
 	}
 }
 
@@ -121,7 +187,9 @@ func TestApprovalActionMessageConvertsCardButtonToCommand(t *testing.T) {
 
 type recordingSDK struct {
 	larktypes.Channel
-	sent *larktypes.SendInput
+	sent      *larktypes.SendInput
+	sendCount int
+	sendErr   error
 }
 
 func (s *recordingSDK) Send(
@@ -129,5 +197,9 @@ func (s *recordingSDK) Send(
 	input *larktypes.SendInput,
 ) (*larktypes.SendResult, error) {
 	s.sent = input
+	s.sendCount++
+	if s.sendErr != nil {
+		return nil, s.sendErr
+	}
 	return &larktypes.SendResult{MessageID: "approval-card"}, nil
 }
